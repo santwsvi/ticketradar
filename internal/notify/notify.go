@@ -216,7 +216,7 @@ Status: %s
 Detectado às: %s
 
 ---
-Para cancelar sua inscrição: privacidade@ticketradar.app
+Para cancelar sua inscrição: privacidade@ticketradar.com.br
 
 TicketRadar — Você dormiu. A gente não.`,
 		alert.EventLabel, alert.EventURL, alert.Status, alert.DetectedAt)
@@ -241,7 +241,7 @@ O que acontece agora:
 • Quando detectarmos que ingressos abriram, você recebe um alerta imediatamente.
 • Sem spam. Só alertas reais.
 
-Quer sair da lista? Manda um email para: privacidade@ticketradar.app
+Quer sair da lista? Manda um email para: privacidade@ticketradar.com.br
 
 Boa sorte na fila! 🎟️
 

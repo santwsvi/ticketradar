@@ -13,12 +13,12 @@ info:
     - `POST /api/waitlist`: máximo **3 requisições por minuto por IP**. Excedido → `429 Too Many Requests`.
   version: "1.0.0"
   contact:
-    email: privacidade@ticketradar.app
+    email: privacidade@ticketradar.com.br
 
 servers:
   - url: http://localhost:8080
     description: Local
-  - url: https://ticketradar.up.railway.app
+  - url: https://ticketradar.com.br
     description: Produção
 
 tags:
