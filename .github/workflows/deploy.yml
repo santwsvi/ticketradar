@@ -5,35 +5,35 @@ on:
     branches: [main]
 
 jobs:
+  # Reutiliza o CI inline antes de deployar
+  build-and-test:
+    name: Build, Vet & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - run: go mod download
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./... -race
+
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
+    needs: build-and-test   # só roda se o CI passar
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Wait for CI to pass
-        uses: lewagon/wait-on-check-action@v1.3.4
-        with:
-          ref: ${{ github.sha }}
-          check-name: 'Build, Vet & Test'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 10
-          allowed-conclusions: success
-
       - name: Deploy via Railway API
         run: |
-          echo "Triggering Railway deploy..."
+          echo "CI passed — triggering Railway redeploy..."
           RESPONSE=$(curl -s -X POST https://backboard.railway.app/graphql/v2 \
             -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
-              "query": "mutation ServiceInstanceRedeploy($serviceId: String!, $environmentId: String!) { serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId) }",
-              "variables": {
-                "serviceId": "763ab83e-b8e5-4298-b319-b4eed99201ef",
-                "environmentId": "ef29ff9e-e5a4-40b8-b3be-3065293cc0a4"
-              }
+              "query": "mutation { serviceInstanceRedeploy(serviceId: \"763ab83e-b8e5-4298-b319-b4eed99201ef\", environmentId: \"ef29ff9e-e5a4-40b8-b3be-3065293cc0a4\") }"
             }')
           echo "Response: $RESPONSE"
           if echo "$RESPONSE" | grep -q '"errors"'; then
