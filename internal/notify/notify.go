@@ -87,12 +87,16 @@ func sendViaResend(apiKey, from, to, subject, body string) error {
 	return nil
 }
 
-// fromAddress retorna o endereço remetente formatado
+// fromAddress retorna o endereço remetente formatado.
+// Resend exige domínio verificado para remetentes customizados.
+// Enquanto não há domínio verificado, usa o endereço padrão do Resend.
 func fromAddress(cfg Config) string {
-	if cfg.EmailFrom != "" {
+	// Se EMAIL_FROM for de domínio verificado no Resend, usa ele.
+	// Caso contrário, usa o endereço de teste do Resend (funciona sem verificação).
+	if cfg.EmailFrom != "" && !strings.HasSuffix(cfg.EmailFrom, "@gmail.com") {
 		return "TicketRadar <" + cfg.EmailFrom + ">"
 	}
-	return "TicketRadar <noreply@ticketradar.app>"
+	return "TicketRadar <onboarding@resend.dev>"
 }
 
 // SendAll envia alerta por todos os canais configurados em paralelo.
