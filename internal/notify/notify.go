@@ -1,23 +1,24 @@
 package notify
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
-
-	"gopkg.in/gomail.v2"
 )
 
 // Config contém as credenciais de notificação
 type Config struct {
-	// Email
-	EmailFrom     string
-	EmailPassword string
-	EmailTo       string
+	// Email — Resend API (HTTPS, sem SMTP)
+	ResendAPIKey string
+	EmailFrom    string
+	EmailTo      string
 
 	// Twilio SMS
 	TwilioSID   string
@@ -34,15 +35,70 @@ type Alert struct {
 	DetectedAt string
 }
 
-// SendAll envia alerta por todos os canais configurados em paralelo.
-// M1: SMS e Email são disparados concorrentemente via goroutines + WaitGroup.
-// Erros são coletados via channel com buffer para evitar goroutine leak.
-func SendAll(cfg Config, alert Alert) []error {
-	type result struct {
-		err error
+// resendPayload é o body da API do Resend
+type resendPayload struct {
+	From    string   `json:"from"`
+	To      []string `json:"to"`
+	Subject string   `json:"subject"`
+	Text    string   `json:"text"`
+}
+
+// sendViaResend envia email usando a API HTTP do Resend (porta 443 — sem SMTP)
+// Funciona no Railway free tier que bloqueia saída na porta 587.
+func sendViaResend(apiKey, from, to, subject, body string) error {
+	if apiKey == "" {
+		return fmt.Errorf("RESEND_API_KEY não configurado")
+	}
+	if to == "" {
+		return fmt.Errorf("destinatário não definido")
 	}
 
-	// Buffer igual ao número de canais — nunca bloqueia o sender
+	payload := resendPayload{
+		From:    from,
+		To:      []string{to},
+		Subject: subject,
+		Text:    body,
+	}
+
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("serializar payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "https://api.resend.com/emails", bytes.NewReader(b))
+	if err != nil {
+		return fmt.Errorf("criar request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("chamada API Resend: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("Resend retornou %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// fromAddress retorna o endereço remetente formatado
+func fromAddress(cfg Config) string {
+	if cfg.EmailFrom != "" {
+		return "TicketRadar <" + cfg.EmailFrom + ">"
+	}
+	return "TicketRadar <noreply@ticketradar.app>"
+}
+
+// SendAll envia alerta por todos os canais configurados em paralelo.
+func SendAll(cfg Config, alert Alert) []error {
+	type result struct{ err error }
+
 	ch := make(chan result, 2)
 	var wg sync.WaitGroup
 
@@ -66,7 +122,6 @@ func SendAll(cfg Config, alert Alert) []error {
 		}
 	}()
 
-	// Fecha o canal após ambas as goroutines terminarem
 	go func() {
 		wg.Wait()
 		close(ch)
@@ -82,8 +137,7 @@ func SendAll(cfg Config, alert Alert) []error {
 }
 
 // SendAllToUser tenta enviar email para um usuário específico com retry (máx 3 tentativas).
-// Sprint 2: backoff progressivo — 0s, 30s, 5min — para lidar com falhas transientes de SMTP.
-// Apenas email por ora (SMS é caro para muitos usuários).
+// Backoff progressivo: 0s → 30s → 5min.
 func SendAllToUser(cfg Config, toEmail string, alert Alert) error {
 	var lastErr error
 	delays := []time.Duration{0, 30 * time.Second, 5 * time.Minute}
@@ -97,14 +151,12 @@ func SendAllToUser(cfg Config, toEmail string, alert Alert) error {
 			log.Printf("tentativa %d/%d falhou para %s: %v", i+1, len(delays), maskEmailLog(toEmail), err)
 			continue
 		}
-		return nil // sucesso
+		return nil
 	}
 	return fmt.Errorf("todas as %d tentativas falharam: %w", len(delays), lastErr)
 }
 
-// maskEmailLog — helper local para mascarar email em logs de retry.
-// Usa apenas os 2 primeiros caracteres do local-part para máxima privacidade.
-// C5: evita exposição de PII em logs de produção (LGPD Art. 46).
+// maskEmailLog mascara email para logs — 2 chars + *** + @domínio
 func maskEmailLog(email string) string {
 	parts := strings.SplitN(email, "@", 2)
 	if len(parts) != 2 || len(parts[0]) <= 2 {
@@ -140,27 +192,17 @@ func SendSMS(cfg Config, alert Alert) error {
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("twilio retornou status %d", resp.StatusCode)
 	}
-
 	return nil
 }
 
-// SendEmail envia alerta via Gmail SMTP para o destinatário configurado em cfg.EmailTo
+// SendEmail envia alerta para o destinatário configurado em cfg.EmailTo
 func SendEmail(cfg Config, alert Alert) error {
 	return SendEmailToUser(cfg, cfg.EmailTo, alert)
 }
 
-// SendEmailToUser envia alerta de disponibilidade para um destinatário específico.
-// Sprint 2: permite notificar cada usuário da waitlist individualmente.
+// SendEmailToUser envia alerta de disponibilidade para um destinatário específico via Resend.
 func SendEmailToUser(cfg Config, toEmail string, alert Alert) error {
-	if toEmail == "" {
-		return fmt.Errorf("destinatário de email não definido")
-	}
-
-	m := gomail.NewMessage()
-	m.SetHeader("From", cfg.EmailFrom)
-	m.SetHeader("To", toEmail)
-	m.SetHeader("Subject", fmt.Sprintf("🎟️ DISPONÍVEL: %s", alert.EventLabel))
-
+	subject := fmt.Sprintf("🎟️ DISPONÍVEL: %s", alert.EventLabel)
 	body := fmt.Sprintf(`CORRE! Detectamos disponibilidade para %s
 
 Acesse agora:
@@ -170,57 +212,37 @@ Status: %s
 Detectado às: %s
 
 ---
-Para cancelar sua inscrição, acesse:
-DELETE /api/waitlist?email=%s
+Para cancelar sua inscrição: privacidade@ticketradar.app
 
 TicketRadar — Você dormiu. A gente não.`,
-		alert.EventLabel, alert.EventURL, alert.Status, alert.DetectedAt, toEmail)
+		alert.EventLabel, alert.EventURL, alert.Status, alert.DetectedAt)
 
-	m.SetBody("text/plain", body)
-
-	d := gomail.NewDialer("smtp.gmail.com", 587, cfg.EmailFrom, cfg.EmailPassword)
-	return d.DialAndSend(m)
+	return sendViaResend(cfg.ResendAPIKey, fromAddress(cfg), toEmail, subject, body)
 }
 
-// SendWelcomeEmail envia email de boas-vindas ao usuário recém-cadastrado na waitlist.
-// Confirma o cadastro, explica o produto e instrui como cancelar (LGPD Art. 18, IV).
+// SendWelcomeEmail envia email de boas-vindas ao usuário recém-cadastrado via Resend.
 func SendWelcomeEmail(cfg Config, toEmail, name string) error {
-	if toEmail == "" {
-		return fmt.Errorf("destinatário de email não definido")
-	}
-
 	displayName := name
 	if displayName == "" {
 		displayName = "por aí"
 	}
 
-	m := gomail.NewMessage()
-	m.SetHeader("From", cfg.EmailFrom)
-	m.SetHeader("To", toEmail)
-	m.SetHeader("Subject", "🎟️ Você está na lista do TicketRadar!")
-
-	body := fmt.Sprintf(`Oi, %s!
+	subject := "🎟️ Você está na lista do TicketRadar!"
+	body := fmt.Sprintf(`Oi, %s! 👋
 
 Seu cadastro no TicketRadar foi confirmado. 🎉
 
 O que acontece agora:
-• Monitoramos a disponibilidade dos ingressos automaticamente, 24/7.
-• Quando detectarmos que os ingressos abriram, você recebe um email imediatamente.
-• Sem spam. Só alertas reais quando os ingressos estiverem disponíveis.
+• Monitoramos a disponibilidade dos ingressos 24/7, a cada 30 segundos.
+• Quando detectarmos que ingressos abriram, você recebe um alerta imediatamente.
+• Sem spam. Só alertas reais.
 
-Quer sair da lista? Sem problema.
-Envie uma requisição DELETE para:
-  DELETE /api/waitlist?email=%s
-(com o header X-Delete-Token fornecido no cadastro)
+Quer sair da lista? Manda um email para: privacidade@ticketradar.app
 
 Boa sorte na fila! 🎟️
 
 ---
-TicketRadar — Você dormiu. A gente não.`,
-		displayName, toEmail)
+TicketRadar — Você dormiu. A gente não.`, displayName)
 
-	m.SetBody("text/plain", body)
-
-	d := gomail.NewDialer("smtp.gmail.com", 587, cfg.EmailFrom, cfg.EmailPassword)
-	return d.DialAndSend(m)
+	return sendViaResend(cfg.ResendAPIKey, fromAddress(cfg), toEmail, subject, body)
 }

@@ -49,9 +49,9 @@ func loadConfig() Config {
 	}
 	return Config{
 		Config: notify.Config{
-			EmailFrom:     os.Getenv("EMAIL_FROM"),
-			EmailPassword: os.Getenv("EMAIL_PASSWORD"),
-			EmailTo:       os.Getenv("EMAIL_TO"),
+			ResendAPIKey: os.Getenv("RESEND_API_KEY"),
+			EmailFrom:    os.Getenv("EMAIL_FROM"),
+			EmailTo:      os.Getenv("EMAIL_TO"),
 			TwilioSID:     os.Getenv("TWILIO_SID"),
 			TwilioToken:   os.Getenv("TWILIO_TOKEN"),
 			TwilioFrom:    os.Getenv("TWILIO_FROM"),
