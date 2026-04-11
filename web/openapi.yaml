@@ -1,0 +1,330 @@
+openapi: "3.0.3"
+info:
+  title: TicketRadar API
+  description: |
+    API do TicketRadar — plataforma de alertas de disponibilidade de ingressos.
+
+    ## Autenticação
+    - A maioria dos endpoints é pública.
+    - O endpoint `DELETE /api/waitlist` requer o header `X-Delete-Token` (configurado via env var `DELETE_TOKEN`).
+    - O endpoint `GET /api/me` requer o mesmo token.
+
+    ## Rate Limiting
+    - `POST /api/waitlist`: máximo **3 requisições por minuto por IP**. Excedido → `429 Too Many Requests`.
+  version: "1.0.0"
+  contact:
+    email: privacidade@ticketradar.app
+
+servers:
+  - url: http://localhost:8080
+    description: Local
+  - url: https://ticketradar.up.railway.app
+    description: Produção
+
+tags:
+  - name: health
+    description: Saúde do serviço
+  - name: events
+    description: Monitoramento de eventos
+  - name: waitlist
+    description: Lista de espera (LGPD compliant)
+  - name: lgpd
+    description: Direitos do titular (LGPD Art. 18)
+  - name: metrics
+    description: Métricas internas
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      description: Verifica se o servidor está respondendo. Usado pelo Railway para readiness probe.
+      responses:
+        "200":
+          description: Servidor saudável
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  version:
+                    type: string
+                    example: "1.0.0"
+
+  /api/status:
+    get:
+      tags: [events]
+      summary: Status dos eventos monitorados
+      description: Retorna o último salesStatus verificado para cada evento monitorado.
+      responses:
+        "200":
+          description: Mapa de evento → status
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+                  enum: [IN_SALE, ON_SALE, PRE_SALE, AVAILABLE, SOLD_OUT, UNKNOWN]
+              example:
+                "BTS 28/10": "SOLD_OUT"
+                "BTS 30/10": "IN_SALE"
+                "BTS 31/10": "SOLD_OUT"
+
+  /api/metrics:
+    get:
+      tags: [metrics]
+      summary: Métricas do sistema
+      description: Retorna contadores internos para o dashboard de monitoramento.
+      responses:
+        "200":
+          description: Métricas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Metrics"
+
+  /api/history:
+    get:
+      tags: [events]
+      summary: Histórico de status
+      description: Retorna as últimas entradas do log de verificações.
+      parameters:
+        - name: limit
+          in: query
+          description: Número de entradas a retornar (padrão 20, máx 100)
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        "200":
+          description: Lista de entradas do histórico
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HistoryEntry"
+
+  /api/waitlist:
+    post:
+      tags: [waitlist]
+      summary: Cadastro na lista de espera
+      description: |
+        Registra um novo usuário na lista de espera.
+
+        **LGPD:** O campo `consent_terms` é obrigatório (base legal: consentimento, Art. 7, I).
+        O registro de consentimento com timestamp é armazenado conforme Art. 8.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WaitlistRequest"
+      responses:
+        "200":
+          description: Cadastrado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WaitlistResponse"
+        "400":
+          description: Dados inválidos ou consentimento ausente
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                sem_email:
+                  value: {"error": "email obrigatório"}
+                sem_consentimento:
+                  value: {"error": "aceite dos termos obrigatório (LGPD Art. 7)"}
+        "429":
+          description: Rate limit excedido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "muitas requisições, tente novamente em 1 minuto"
+
+    delete:
+      tags: [lgpd]
+      summary: Exclusão de dados (direito ao esquecimento)
+      description: |
+        Remove todos os dados pessoais de um titular da base de dados.
+
+        **LGPD Art. 18, IV** — Direito ao esquecimento / eliminação de dados.
+
+        Requer o header `X-Delete-Token` com o token configurado no servidor.
+        A operação é registrada no audit log com hash do email.
+      parameters:
+        - name: email
+          in: query
+          required: true
+          description: E-mail do titular a ser removido
+          schema:
+            type: string
+            format: email
+      security:
+        - DeleteToken: []
+      responses:
+        "200":
+          description: Dados removidos com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Dados removidos com sucesso."
+        "400":
+          description: Email não informado
+        "401":
+          description: Token ausente ou inválido
+        "500":
+          description: Erro interno
+
+  /api/me:
+    get:
+      tags: [lgpd]
+      summary: Portabilidade de dados (LGPD Art. 18, V)
+      description: |
+        Retorna todos os dados pessoais armazenados de um titular.
+
+        **LGPD Art. 18, V** — Direito à portabilidade.
+
+        Requer o header `X-Delete-Token` para autenticação.
+      parameters:
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+            format: email
+      security:
+        - DeleteToken: []
+      responses:
+        "200":
+          description: Dados do titular
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WaitlistEntry"
+        "404":
+          description: Titular não encontrado
+        "401":
+          description: Token ausente ou inválido
+
+components:
+  securitySchemes:
+    DeleteToken:
+      type: apiKey
+      in: header
+      name: X-Delete-Token
+
+  schemas:
+    WaitlistRequest:
+      type: object
+      required: [email, consent_terms]
+      properties:
+        name:
+          type: string
+          example: "Victor Gabriel"
+        email:
+          type: string
+          format: email
+          example: "victor@email.com"
+        whatsapp:
+          type: string
+          example: "+5531999999999"
+        categories:
+          type: string
+          example: "shows internacionais, festivais"
+        consent_terms:
+          type: boolean
+          description: "Consentimento obrigatório (LGPD Art. 7, I)"
+          example: true
+        consent_marketing:
+          type: boolean
+          description: "Consentimento para comunicações de marketing (opcional)"
+          example: false
+
+    WaitlistResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Você está na lista! Te avisamos quando lançar."
+        total:
+          type: integer
+          example: 42
+
+    WaitlistEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        whatsapp:
+          type: string
+        categories:
+          type: string
+        consent_marketing:
+          type: boolean
+        consent_terms:
+          type: boolean
+        consent_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    Metrics:
+      type: object
+      properties:
+        waitlist_count:
+          type: integer
+          example: 42
+        total_checks:
+          type: integer
+          example: 1234
+        uptime_seconds:
+          type: integer
+          example: 3600
+
+    HistoryEntry:
+      type: object
+      properties:
+        event:
+          type: string
+          example: "BTS 28/10"
+        status:
+          type: string
+          enum: [IN_SALE, ON_SALE, PRE_SALE, AVAILABLE, SOLD_OUT, UNKNOWN]
+          example: "IN_SALE"
+        at:
+          type: string
+          example: "15:42:01"
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "mensagem de erro"

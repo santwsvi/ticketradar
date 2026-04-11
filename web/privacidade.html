@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Política de Privacidade — TicketRadar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0D0D0D;
+    --bg2: #141414;
+    --primary: #FF4B6E;
+    --secondary: #FFD166;
+    --success: #06D6A0;
+    --text: #F0F0F5;
+    --muted: #8B8FA3;
+    --border: rgba(255,255,255,0.08);
+    --glass: rgba(255,255,255,0.04);
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    line-height: 1.7;
+  }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--primary); border-radius: 3px; }
+
+  /* ── NAV ── */
+  nav {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 24px;
+    background: rgba(13,13,13,0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo {
+    font-size: 1.1rem; font-weight: 800;
+    letter-spacing: -0.02em;
+    text-decoration: none;
+    color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .logo span { color: var(--primary); }
+
+  .back-link {
+    font-size: 0.85rem; color: var(--muted);
+    text-decoration: none;
+    transition: color 0.2s;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .back-link:hover { color: var(--text); }
+
+  /* ── LAYOUT ── */
+  main {
+    max-width: 740px;
+    margin: 0 auto;
+    padding: 56px 24px 80px;
+  }
+
+  /* ── HEADER ── */
+  .page-header {
+    margin-bottom: 48px;
+    padding-bottom: 32px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .page-badge {
+    display: inline-block;
+    background: rgba(255,75,110,0.1);
+    border: 1px solid rgba(255,75,110,0.25);
+    border-radius: 6px;
+    padding: 4px 12px;
+    font-size: 0.72rem; font-weight: 700;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--primary);
+    margin-bottom: 16px;
+  }
+
+  h1 {
+    font-size: clamp(1.8rem, 4vw, 2.6rem);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+    margin-bottom: 12px;
+  }
+
+  .page-meta {
+    font-size: 0.82rem; color: var(--muted);
+    display: flex; gap: 16px; flex-wrap: wrap;
+  }
+
+  /* ── CONTENT ── */
+  .section {
+    margin-bottom: 40px;
+  }
+
+  h2 {
+    font-size: 1.15rem; font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    margin-bottom: 12px;
+    display: flex; align-items: center; gap: 10px;
+  }
+
+  h2::before {
+    content: '';
+    display: inline-block;
+    width: 3px; height: 18px;
+    background: var(--primary);
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  p {
+    font-size: 0.93rem;
+    color: #C8CAD6;
+    margin-bottom: 12px;
+    line-height: 1.75;
+  }
+
+  ul, ol {
+    padding-left: 20px;
+    margin-bottom: 12px;
+  }
+
+  li {
+    font-size: 0.93rem;
+    color: #C8CAD6;
+    margin-bottom: 6px;
+    line-height: 1.75;
+  }
+
+  strong { color: var(--text); font-weight: 600; }
+
+  a {
+    color: var(--primary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  a:hover { color: var(--secondary); }
+
+  /* ── HIGHLIGHT BOX ── */
+  .highlight-box {
+    background: var(--glass);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--success);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin: 16px 0;
+    font-size: 0.9rem;
+    color: #C8CAD6;
+    line-height: 1.65;
+  }
+
+  .highlight-box.warn {
+    border-left-color: var(--secondary);
+  }
+
+  /* ── RIGHTS TABLE ── */
+  .rights-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+
+  .right-card {
+    background: var(--glass);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+
+  .right-card .right-icon { font-size: 1.4rem; margin-bottom: 8px; }
+  .right-card .right-title { font-size: 0.85rem; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+  .right-card .right-desc { font-size: 0.8rem; color: var(--muted); line-height: 1.5; }
+
+  /* ── CONTACT BLOCK ── */
+  .contact-block {
+    background: var(--glass);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px;
+    margin-top: 12px;
+  }
+
+  .contact-block p { margin-bottom: 6px; }
+  .contact-block strong { color: var(--text); }
+
+  /* ── FOOTER ── */
+  footer {
+    background: var(--bg2);
+    border-top: 1px solid var(--border);
+    padding: 28px 24px;
+    text-align: center;
+  }
+
+  .footer-links {
+    display: flex; align-items: center; justify-content: center; gap: 20px;
+    flex-wrap: wrap;
+    font-size: 0.82rem;
+  }
+
+  .footer-links a { color: var(--muted); text-decoration: none; transition: color 0.2s; }
+  .footer-links a:hover { color: var(--text); }
+  .footer-sep { color: var(--border); }
+
+  @media (max-width: 600px) {
+    main { padding: 40px 20px 60px; }
+    .rights-grid { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="logo">🎟️ <span>Ticket</span>Radar</a>
+  <a href="/" class="back-link">← Voltar ao início</a>
+</nav>
+
+<main>
+
+  <header class="page-header">
+    <div class="page-badge">LGPD — Lei 13.709/2018</div>
+    <h1>Política de Privacidade</h1>
+    <div class="page-meta">
+      <span>📅 Última atualização: junho de 2025</span>
+      <span>🔒 Versão 1.0</span>
+    </div>
+  </header>
+
+  <!-- 1. Quem somos -->
+  <div class="section">
+    <h2>Quem somos</h2>
+    <p>
+      O <strong>TicketRadar</strong> é um serviço de monitoramento de disponibilidade de ingressos para shows e eventos. Monitoramos páginas públicas de venda e enviamos alertas por SMS, e-mail ou WhatsApp quando detectamos disponibilidade.
+    </p>
+    <p>
+      Esta Política descreve como coletamos, usamos, armazenamos e protegemos seus dados pessoais, em conformidade com a <strong>Lei Geral de Proteção de Dados (LGPD — Lei n.º 13.709/2018)</strong>.
+    </p>
+  </div>
+
+  <!-- 2. Dados coletados -->
+  <div class="section">
+    <h2>Dados que coletamos</h2>
+    <p>Coletamos apenas os dados estritamente necessários para prestar o serviço:</p>
+    <ul>
+      <li><strong>Nome</strong> — para personalizar as comunicações</li>
+      <li><strong>E-mail</strong> — para envio de alertas e contato</li>
+      <li><strong>WhatsApp</strong> (opcional) — para alertas via mensagem</li>
+      <li><strong>Preferências de categoria</strong> (ex: shows nacionais, festivais) — para filtrar alertas relevantes</li>
+      <li><strong>Registro de consentimento</strong> — data/hora em que você aceitou os termos (obrigação legal)</li>
+    </ul>
+
+    <div class="highlight-box">
+      ✅ <strong>Não coletamos</strong> dados de pagamento, documentos de identidade, localização geográfica, dados de navegação além do necessário ou qualquer outra informação sensível.
+    </div>
+  </div>
+
+  <!-- 3. Finalidade -->
+  <div class="section">
+    <h2>Para que usamos seus dados</h2>
+    <p>Seus dados são usados exclusivamente para:</p>
+    <ol>
+      <li>Enviar alertas de disponibilidade de ingressos pelos canais que você escolheu</li>
+      <li>Comunicar sobre o lançamento e atualizações do TicketRadar</li>
+      <li>Cumprir obrigações legais (ex: registros de consentimento exigidos pela LGPD)</li>
+      <li>Enviar comunicações de marketing, <strong>somente se você consentiu expressamente</strong></li>
+    </ol>
+
+    <div class="highlight-box warn">
+      ⚠️ <strong>Nunca</strong> vendemos, alugamos ou compartilhamos seus dados com terceiros para fins publicitários.
+    </div>
+  </div>
+
+  <!-- 4. Base legal -->
+  <div class="section">
+    <h2>Base legal do tratamento</h2>
+    <p>
+      O tratamento dos seus dados é realizado com base no <strong>consentimento do titular</strong>, conforme o <strong>Art. 7º, inciso I da LGPD</strong>. Você fornece consentimento explícito ao marcar a caixa de aceite no formulário de cadastro.
+    </p>
+    <p>
+      O consentimento para recebimento de comunicações de marketing é <strong>separado e opcional</strong> — você pode se cadastrar na lista sem aceitar receber marketing.
+    </p>
+    <p>
+      Você pode revogar seu consentimento a qualquer momento, solicitando a exclusão dos seus dados conforme descrito na seção <em>Direitos do Titular</em> abaixo.
+    </p>
+  </div>
+
+  <!-- 5. Retenção -->
+  <div class="section">
+    <h2>Por quanto tempo guardamos seus dados</h2>
+    <p>
+      Seus dados pessoais são mantidos enquanto você desejar receber os alertas do TicketRadar ou até que você solicite a exclusão. <strong>Não há prazo mínimo de retenção.</strong>
+    </p>
+    <p>
+      Registros de auditoria (sem dados pessoais identificáveis — apenas hashes criptográficos) podem ser mantidos por até 5 anos para cumprir obrigações legais (LGPD Art. 37).
+    </p>
+    <p>
+      Logs técnicos de monitoramento (URLs de eventos e status) são mantidos por no máximo 48 horas e então automaticamente descartados.
+    </p>
+  </div>
+
+  <!-- 6. Compartilhamento -->
+  <div class="section">
+    <h2>Com quem compartilhamos</h2>
+    <p>Para prestar o serviço de alertas, utilizamos os seguintes provedores técnicos:</p>
+    <ul>
+      <li><strong>Twilio</strong> — envio de SMS (dados: número de telefone e mensagem)</li>
+      <li><strong>Gmail / Google SMTP</strong> — envio de e-mails de alerta (dados: endereço de e-mail e mensagem)</li>
+      <li><strong>Railway</strong> — hospedagem da aplicação e banco de dados (dados: todos os dados armazenados)</li>
+    </ul>
+    <p>
+      Todos os provedores são selecionados com base em sua conformidade com regulamentações de privacidade e possuem mecanismos adequados de proteção de dados.
+    </p>
+  </div>
+
+  <!-- 7. Direitos do titular -->
+  <div class="section">
+    <h2>Seus direitos como titular</h2>
+    <p>A LGPD garante a você os seguintes direitos sobre seus dados pessoais:</p>
+
+    <div class="rights-grid">
+      <div class="right-card">
+        <div class="right-icon">👁️</div>
+        <div class="right-title">Acesso</div>
+        <div class="right-desc">Saber quais dados temos sobre você (Art. 18, II)</div>
+      </div>
+      <div class="right-card">
+        <div class="right-icon">✏️</div>
+        <div class="right-title">Correção</div>
+        <div class="right-desc">Corrigir dados incompletos ou desatualizados (Art. 18, III)</div>
+      </div>
+      <div class="right-card">
+        <div class="right-icon">🗑️</div>
+        <div class="right-title">Exclusão</div>
+        <div class="right-desc">Solicitar o apagamento completo dos seus dados (Art. 18, VI)</div>
+      </div>
+      <div class="right-card">
+        <div class="right-icon">📦</div>
+        <div class="right-title">Portabilidade</div>
+        <div class="right-desc">Receber seus dados em formato estruturado (Art. 18, V)</div>
+      </div>
+      <div class="right-card">
+        <div class="right-icon">🚫</div>
+        <div class="right-title">Revogação</div>
+        <div class="right-desc">Retirar o consentimento a qualquer momento (Art. 18, IX)</div>
+      </div>
+      <div class="right-card">
+        <div class="right-icon">ℹ️</div>
+        <div class="right-title">Informação</div>
+        <div class="right-desc">Saber com quem compartilhamos seus dados (Art. 18, VII)</div>
+      </div>
+    </div>
+
+    <div class="highlight-box">
+      📧 Para exercer qualquer um desses direitos, envie um e-mail para <a href="mailto:privacidade@ticketradar.app"><strong>privacidade@ticketradar.app</strong></a> com o assunto "<strong>Direitos LGPD</strong>" e seu e-mail cadastrado. Responderemos em até <strong>15 dias úteis</strong>.
+    </div>
+  </div>
+
+  <!-- 8. Segurança -->
+  <div class="section">
+    <h2>Como protegemos seus dados</h2>
+    <p>Adotamos medidas técnicas e organizacionais para proteger seus dados:</p>
+    <ul>
+      <li>Comunicações protegidas por <strong>HTTPS/TLS</strong></li>
+      <li>Banco de dados com acesso restrito e credenciais em variáveis de ambiente</li>
+      <li>Logs de auditoria com <strong>hash criptográfico</strong> (SHA-256) do e-mail — nunca o e-mail em claro</li>
+      <li>Senhas e tokens nunca armazenados em código-fonte</li>
+      <li>Rate limiting para prevenir abuso do formulário de cadastro</li>
+    </ul>
+  </div>
+
+  <!-- 9. Cookies -->
+  <div class="section">
+    <h2>Cookies e rastreamento</h2>
+    <p>
+      O TicketRadar <strong>não utiliza cookies de rastreamento</strong> nem ferramentas de analytics de terceiros (ex: Google Analytics). Utilizamos apenas os recursos técnicos necessários para o funcionamento da página.
+    </p>
+  </div>
+
+  <!-- 10. Contato e DPO -->
+  <div class="section">
+    <h2>Contato e Encarregado de Dados (DPO)</h2>
+    <p>Para dúvidas sobre esta Política ou sobre o tratamento dos seus dados, entre em contato:</p>
+
+    <div class="contact-block">
+      <p><strong>TicketRadar</strong></p>
+      <p>📧 E-mail geral: <a href="mailto:contato@ticketradar.app">contato@ticketradar.app</a></p>
+      <p>🔒 Privacidade / DPO: <a href="mailto:privacidade@ticketradar.app">privacidade@ticketradar.app</a></p>
+      <p style="margin-top:12px; font-size:0.82rem; color:var(--muted);">
+        O Encarregado pelo Tratamento de Dados Pessoais (DPO) pode ser acionado pelo e-mail acima para questões relacionadas à LGPD, solicitações de titulares e notificações de incidentes.
+      </p>
+    </div>
+  </div>
+
+  <!-- 11. Atualizações -->
+  <div class="section">
+    <h2>Atualizações desta Política</h2>
+    <p>
+      Esta Política pode ser atualizada periodicamente para refletir mudanças no serviço ou na legislação. Quando houver alterações relevantes, notificaremos via e-mail os usuários cadastrados. A data da última atualização está sempre indicada no topo desta página.
+    </p>
+    <p>
+      O uso continuado do serviço após a notificação de mudanças implica a aceitação da nova Política.
+    </p>
+  </div>
+
+</main>
+
+<footer>
+  <div class="footer-links">
+    <a href="/">Início</a>
+    <span class="footer-sep">·</span>
+    <a href="/privacidade.html">Privacidade</a>
+    <span class="footer-sep">·</span>
+    <a href="/termos.html">Termos de Uso</a>
+    <span class="footer-sep">·</span>
+    <a href="mailto:privacidade@ticketradar.app">Contato DPO</a>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Termos de Uso — TicketRadar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0D0D0D;
+    --bg2: #141414;
+    --primary: #FF4B6E;
+    --secondary: #FFD166;
+    --success: #06D6A0;
+    --text: #F0F0F5;
+    --muted: #8B8FA3;
+    --border: rgba(255,255,255,0.08);
+    --glass: rgba(255,255,255,0.04);
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    line-height: 1.7;
+  }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--primary); border-radius: 3px; }
+
+  /* ── NAV ── */
+  nav {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 24px;
+    background: rgba(13,13,13,0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo {
+    font-size: 1.1rem; font-weight: 800;
+    letter-spacing: -0.02em;
+    text-decoration: none;
+    color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .logo span { color: var(--primary); }
+
+  .back-link {
+    font-size: 0.85rem; color: var(--muted);
+    text-decoration: none;
+    transition: color 0.2s;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .back-link:hover { color: var(--text); }
+
+  /* ── LAYOUT ── */
+  main {
+    max-width: 740px;
+    margin: 0 auto;
+    padding: 56px 24px 80px;
+  }
+
+  /* ── HEADER ── */
+  .page-header {
+    margin-bottom: 48px;
+    padding-bottom: 32px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .page-badge {
+    display: inline-block;
+    background: rgba(255,209,102,0.1);
+    border: 1px solid rgba(255,209,102,0.25);
+    border-radius: 6px;
+    padding: 4px 12px;
+    font-size: 0.72rem; font-weight: 700;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--secondary);
+    margin-bottom: 16px;
+  }
+
+  h1 {
+    font-size: clamp(1.8rem, 4vw, 2.6rem);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+    margin-bottom: 12px;
+  }
+
+  .page-meta {
+    font-size: 0.82rem; color: var(--muted);
+    display: flex; gap: 16px; flex-wrap: wrap;
+  }
+
+  /* ── CONTENT ── */
+  .section { margin-bottom: 40px; }
+
+  h2 {
+    font-size: 1.15rem; font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    margin-bottom: 12px;
+    display: flex; align-items: center; gap: 10px;
+  }
+
+  h2::before {
+    content: '';
+    display: inline-block;
+    width: 3px; height: 18px;
+    background: var(--secondary);
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  p {
+    font-size: 0.93rem;
+    color: #C8CAD6;
+    margin-bottom: 12px;
+    line-height: 1.75;
+  }
+
+  ul, ol { padding-left: 20px; margin-bottom: 12px; }
+
+  li {
+    font-size: 0.93rem;
+    color: #C8CAD6;
+    margin-bottom: 6px;
+    line-height: 1.75;
+  }
+
+  strong { color: var(--text); font-weight: 600; }
+
+  a {
+    color: var(--primary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  a:hover { color: var(--secondary); }
+
+  /* ── HIGHLIGHT BOX ── */
+  .highlight-box {
+    background: var(--glass);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--success);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin: 16px 0;
+    font-size: 0.9rem;
+    color: #C8CAD6;
+    line-height: 1.65;
+  }
+
+  .highlight-box.warn { border-left-color: var(--primary); }
+  .highlight-box.info { border-left-color: var(--secondary); }
+
+  /* ── NAO FAZEMOS ── */
+  .nao-fazemos-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+
+  .nao-card {
+    background: var(--glass);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+
+  .nao-card .nao-icon { font-size: 1.5rem; }
+  .nao-card .nao-title {
+    font-size: 0.85rem; font-weight: 700;
+    color: var(--text);
+  }
+  .nao-card .nao-desc {
+    font-size: 0.8rem; color: var(--muted); line-height: 1.5;
+  }
+
+  /* ── FOOTER ── */
+  footer {
+    background: var(--bg2);
+    border-top: 1px solid var(--border);
+    padding: 28px 24px;
+    text-align: center;
+  }
+
+  .footer-links {
+    display: flex; align-items: center; justify-content: center; gap: 20px;
+    flex-wrap: wrap; font-size: 0.82rem;
+  }
+  .footer-links a { color: var(--muted); text-decoration: none; transition: color 0.2s; }
+  .footer-links a:hover { color: var(--text); }
+  .footer-sep { color: var(--border); }
+
+  @media (max-width: 600px) {
+    main { padding: 40px 20px 60px; }
+    .nao-fazemos-grid { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="logo">🎟️ <span>Ticket</span>Radar</a>
+  <a href="/" class="back-link">← Voltar ao início</a>
+</nav>
+
+<main>
+
+  <header class="page-header">
+    <div class="page-badge">Termos de Uso</div>
+    <h1>Termos de Uso</h1>
+    <div class="page-meta">
+      <span>📅 Última atualização: junho de 2025</span>
+      <span>📄 Versão 1.0</span>
+    </div>
+  </header>
+
+  <!-- 1. O que é o serviço -->
+  <div class="section">
+    <h2>O que é o TicketRadar</h2>
+    <p>
+      O <strong>TicketRadar</strong> é um serviço de monitoramento de disponibilidade de ingressos para shows e eventos. Nosso sistema verifica periodicamente as páginas públicas de plataformas de venda de ingressos e notifica você via SMS, e-mail ou WhatsApp quando detectamos que ingressos estão disponíveis para um evento monitorado.
+    </p>
+    <p>
+      Ao se cadastrar na lista de espera ou utilizar o serviço, você concorda com estes Termos de Uso. Se não concordar, por favor, não utilize o serviço.
+    </p>
+  </div>
+
+  <!-- 2. O que fazemos -->
+  <div class="section">
+    <h2>O que fazemos</h2>
+    <ul>
+      <li>Monitoramos <strong>páginas públicas</strong> de plataformas de venda de ingressos</li>
+      <li>Enviamos <strong>alertas</strong> quando detectamos disponibilidade</li>
+      <li>Mantemos sua <strong>fila de espera</strong> para acesso antecipado ao serviço</li>
+      <li>Protegemos seus dados conforme a <a href="/privacidade.html">Política de Privacidade</a></li>
+    </ul>
+
+    <div class="highlight-box">
+      🎟️ O TicketRadar é uma ferramenta de <strong>informação e alerta</strong>. Nós avisamos você — a decisão de compra é sempre sua.
+    </div>
+  </div>
+
+  <!-- 3. O que NÃO fazemos -->
+  <div class="section">
+    <h2>O que não fazemos</h2>
+    <p>Para total clareza, o TicketRadar <strong>nunca</strong>:</p>
+
+    <div class="nao-fazemos-grid">
+      <div class="nao-card">
+        <div class="nao-icon">🚫</div>
+        <div class="nao-title">Não compramos ingressos</div>
+        <div class="nao-desc">Não adquirimos ingressos em seu nome nem armazenamos dados de pagamento</div>
+      </div>
+      <div class="nao-card">
+        <div class="nao-icon">🔐</div>
+        <div class="nao-title">Não acessamos contas</div>
+        <div class="nao-desc">Não solicitamos senhas de plataformas de ingressos nem acessamos contas de usuário</div>
+      </div>
+      <div class="nao-card">
+        <div class="nao-icon">🤖</div>
+        <div class="nao-title">Não usamos bots de compra</div>
+        <div class="nao-desc">Não operamos bots de compra automática nem violamos sistemas de fila virtual</div>
+      </div>
+      <div class="nao-card">
+        <div class="nao-icon">📤</div>
+        <div class="nao-title">Não vendemos seus dados</div>
+        <div class="nao-desc">Não compartilhamos seus dados pessoais com terceiros para fins comerciais</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Legalidade -->
+  <div class="section">
+    <h2>Legalidade do serviço</h2>
+    <p>
+      O TicketRadar monitora exclusivamente <strong>dados públicos</strong> — informações disponíveis a qualquer pessoa que acesse os sites das plataformas de ingressos com um navegador comum. Não realizamos scraping agressivo, não burlamos mecanismos de autenticação nem violamos os termos de serviço das plataformas monitoradas.
+    </p>
+    <p>
+      O serviço opera de forma análoga a um usuário que periodicamente acessa um site para verificar disponibilidade — apenas de forma automatizada e com notificação proativa.
+    </p>
+  </div>
+
+  <!-- 5. Uso aceitável -->
+  <div class="section">
+    <h2>Uso aceitável</h2>
+    <p>Ao utilizar o TicketRadar, você concorda em:</p>
+    <ul>
+      <li>Fornecer informações verdadeiras no cadastro</li>
+      <li>Usar o serviço apenas para fins pessoais e lícitos</li>
+      <li>Não tentar burlar mecanismos de segurança ou rate limiting</li>
+      <li>Não usar o serviço para fins de revenda comercial de ingressos (cambismo)</li>
+    </ul>
+
+    <div class="highlight-box warn">
+      ⚠️ O uso do serviço para alimentar operações de <strong>cambismo ou revenda comercial</strong> de ingressos é expressamente proibido e pode resultar no bloqueio imediato do acesso.
+    </div>
+  </div>
+
+  <!-- 6. Limitação de responsabilidade -->
+  <div class="section">
+    <h2>Limitação de responsabilidade</h2>
+    <p>
+      O TicketRadar é um serviço de <strong>monitoramento e alerta</strong>. Não garantimos:
+    </p>
+    <ul>
+      <li>Que ingressos ainda estarão disponíveis no momento em que você tentar comprá-los após o alerta</li>
+      <li>A precisão absoluta das informações extraídas das páginas monitoradas</li>
+      <li>A disponibilidade contínua e ininterrupta do serviço</li>
+      <li>Que todos os eventos de disponibilidade serão detectados (podem ocorrer falhas de monitoramento)</li>
+    </ul>
+    <p>
+      O TicketRadar <strong>não se responsabiliza</strong> por perdas financeiras, frustração ou qualquer dano decorrente do uso ou incapacidade de uso do serviço, incluindo a não obtenção de ingressos para um evento.
+    </p>
+
+    <div class="highlight-box info">
+      ℹ️ O alerta é uma vantagem competitiva de tempo — <strong>não uma garantia de compra</strong>. A disponibilidade de ingressos depende exclusivamente das plataformas de venda, fora do nosso controle.
+    </div>
+  </div>
+
+  <!-- 7. Disponibilidade -->
+  <div class="section">
+    <h2>Disponibilidade do serviço</h2>
+    <p>
+      Fazemos o melhor esforço para manter o serviço disponível e funcionando. No entanto, podemos interromper ou modificar o serviço a qualquer momento, com ou sem aviso prévio, especialmente para manutenção, atualizações ou em caso de problemas técnicos.
+    </p>
+    <p>
+      O serviço é oferecido <strong>"como está"</strong> (<em>as-is</em>) durante o período de beta/lista de espera, sem garantias de nível de serviço (SLA).
+    </p>
+  </div>
+
+  <!-- 8. Propriedade intelectual -->
+  <div class="section">
+    <h2>Propriedade intelectual</h2>
+    <p>
+      O código, design e conteúdo do TicketRadar são de propriedade de seus criadores. O uso do serviço não transfere nenhum direito de propriedade intelectual ao usuário.
+    </p>
+    <p>
+      Os nomes das plataformas de ingressos mencionadas (Ticketmaster, Eventim, etc.) são marcas registradas de seus respectivos proprietários. O TicketRadar não possui afiliação com nenhuma dessas plataformas.
+    </p>
+  </div>
+
+  <!-- 9. Alterações -->
+  <div class="section">
+    <h2>Alterações nos Termos</h2>
+    <p>
+      Podemos atualizar estes Termos a qualquer momento. Em caso de alterações relevantes, notificaremos os usuários cadastrados por e-mail. O uso continuado do serviço após a notificação implica aceitação dos novos Termos.
+    </p>
+  </div>
+
+  <!-- 10. Contato -->
+  <div class="section">
+    <h2>Contato</h2>
+    <p>
+      Dúvidas sobre estes Termos? Entre em contato:
+    </p>
+    <p>
+      📧 <a href="mailto:contato@ticketradar.app">contato@ticketradar.app</a>
+    </p>
+    <p>
+      Para questões relacionadas à privacidade e LGPD, consulte nossa <a href="/privacidade.html">Política de Privacidade</a>.
+    </p>
+  </div>
+
+</main>
+
+<footer>
+  <div class="footer-links">
+    <a href="/">Início</a>
+    <span class="footer-sep">·</span>
+    <a href="/privacidade.html">Privacidade</a>
+    <span class="footer-sep">·</span>
+    <a href="/termos.html">Termos de Uso</a>
+    <span class="footer-sep">·</span>
+    <a href="mailto:contato@ticketradar.app">Contato</a>
+  </div>
+</footer>
+
+</body>
+</html>
