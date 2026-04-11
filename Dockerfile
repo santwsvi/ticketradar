@@ -11,21 +11,24 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o bin/ticketradar ./cmd/server
 # Runtime stage — imagem mínima
 FROM alpine:3.19
 
-RUN apk --no-cache add ca-certificates tzdata
+# su-exec: troca de usuário sem fork (como gosu, mas menor)
+RUN apk --no-cache add ca-certificates tzdata su-exec
+
 WORKDIR /app
 
 COPY --from=builder /app/bin/ticketradar .
 COPY --from=builder /app/web ./web
+COPY docker-entrypoint.sh /docker-entrypoint.sh
 
-# Criar usuário não-root e diretório /data com permissões corretas
-RUN addgroup -S ticketradar && adduser -S ticketradar -G ticketradar && \
-    mkdir -p /data && chown ticketradar:ticketradar /data
+# Criar usuário não-root para a aplicação
+RUN addgroup -S ticketradar && adduser -S ticketradar -G tickeradar -G ticketradar && \
+    chmod +x /docker-entrypoint.sh
 
-USER ticketradar
-
+# Entrypoint roda como root para ajustar permissões do volume,
+# depois troca para ticketradar via su-exec
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 \
   CMD wget -qO- http://localhost:8080/health || exit 1
 
-CMD ["./ticketradar"]
+ENTRYPOINT ["/docker-entrypoint.sh"]
