@@ -3,25 +3,41 @@ name: Deploy to Railway
 on:
   push:
     branches: [main]
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
 
 jobs:
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'push' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
+      - name: Wait for CI to pass
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Build, Vet & Test'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+          allowed-conclusions: success
 
-      - name: Deploy
-        run: railway up --detach
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy via Railway API
+        run: |
+          echo "Triggering Railway deploy..."
+          RESPONSE=$(curl -s -X POST https://backboard.railway.app/graphql/v2 \
+            -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "query": "mutation ServiceInstanceRedeploy($serviceId: String!, $environmentId: String!) { serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId) }",
+              "variables": {
+                "serviceId": "763ab83e-b8e5-4298-b319-b4eed99201ef",
+                "environmentId": "ef29ff9e-e5a4-40b8-b3be-3065293cc0a4"
+              }
+            }')
+          echo "Response: $RESPONSE"
+          if echo "$RESPONSE" | grep -q '"errors"'; then
+            echo "Deploy trigger failed"
+            exit 1
+          fi
+          echo "Deploy triggered successfully!"
