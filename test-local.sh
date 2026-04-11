@@ -63,7 +63,7 @@ check "DELETE /api/waitlist sem token retorna 401" "$result" "401"
 
 # 8. LGPD — endpoint de exclusão com token correto deve retornar 200
 result=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-  -H "X-Delete-Token: dev-secret-123" \
+  -H "X-Delete-Token: ${DELETE_TOKEN}" \
   "$BASE/api/waitlist?email=teste@ticketradar.app")
 check "DELETE /api/waitlist com token retorna 200" "$result" "200"
 

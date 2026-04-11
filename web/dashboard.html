@@ -424,6 +424,7 @@
     try {
       const r = await fetch(url, { signal: ctrl.signal, cache: 'no-store' });
       clearTimeout(tid);
+      if (r.status === 401) return { __auth_error: true };
       if (!r.ok) return null;
       return await r.json();
     } catch (_) {
@@ -512,6 +513,26 @@
   async function fetchMetrics() {
     const data = await safeFetch('/api/metrics');
     if (!data) return;
+    if (data.__auth_error) {
+      ['m-waitlist', 'm-uptime', 'm-checks'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+          el.style.fontSize = '14px';
+          el.style.webkitTextFillColor = 'var(--gray)';
+          el.textContent = '—';
+        }
+      });
+      // Mostrar mensagem de acesso restrito na seção de métricas
+      const metricsRow = document.getElementById('metrics-row');
+      if (metricsRow && !document.getElementById('metrics-auth-msg')) {
+        const msg = document.createElement('div');
+        msg.id = 'metrics-auth-msg';
+        msg.style.cssText = 'grid-column:1/-1;text-align:center;padding:16px;color:var(--gray);font-size:13px;';
+        msg.textContent = '🔒 Acesso restrito — faça login como admin';
+        metricsRow.appendChild(msg);
+      }
+      return;
+    }
     setVal('m-waitlist', data.waitlist_count   ?? '—');
     setVal('m-uptime',   fmtUptime(data.uptime_seconds));
     setVal('m-checks',   data.total_checks     ?? '—');
@@ -558,7 +579,7 @@
 
   // ── init ─────────────────────────────────────────────────────────────────
   tick();
-  setInterval(tick, 10000);
+  setInterval(tick, 30000);
 })();
 </script>
 </body>

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -50,8 +51,51 @@ var (
 	httpClient    = &http.Client{Timeout: 15 * time.Second}
 )
 
-// Check faz uma requisição à página do evento e retorna o salesStatus
+// allowedDomains — SSRF protection: apenas domínios de plataformas de ingressos conhecidas.
+// Sprint 2: impede que um atacante injete URLs arbitrárias via /admin/events
+// para fazer o servidor realizar requests internos (SSRF).
+var allowedDomains = []string{
+	"ticketmaster.com.br",
+	"eventim.com.br",
+	"sympla.com.br",
+	"ingresso.com",
+	"blueticket.com.br",
+	"tickets4fun.com.br",
+}
+
+// IsAllowedURL verifica se a URL pertence a um domínio da allowlist.
+// Exportada para uso em main.go (validação no endpoint /admin/events).
+// Proteção: normaliza o host para lowercase antes de comparar.
+func IsAllowedURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	// Garante esquema HTTP/HTTPS — rejeita file://, ftp://, etc.
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return false
+	}
+	for _, domain := range allowedDomains {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
+}
+
+// Check faz uma requisição à página do evento e retorna o salesStatus.
+// SSRF protection: valida o domínio da URL antes de realizar o request.
 func Check(event Event, previous Status) (CheckResult, error) {
+	// SSRF: rejeita URLs fora da allowlist antes de qualquer I/O
+	if !IsAllowedURL(event.URL) {
+		return CheckResult{}, fmt.Errorf("domínio não permitido: %s", event.URL)
+	}
+
 	req, err := http.NewRequest("GET", event.URL, nil)
 	if err != nil {
 		return CheckResult{}, fmt.Errorf("criar request: %w", err)

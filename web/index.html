@@ -565,16 +565,16 @@
     <h1>Você vai dormir.<br><em>O TicketRadar não.</em></h1>
 
     <p class="hero-sub">
-      Seja avisado por SMS, e-mail ou WhatsApp assim que ingressos ficarem disponíveis — antes de qualquer um.
+      Entre na lista de espera — os primeiros 500 ganham acesso gratuito vitalício assim que o produto lançar.
     </p>
 
     <a href="#waitlist" class="btn-cta">
-      🚨 Quero ser avisado
+      🎟️ Garantir meu lugar na fila
     </a>
 
-    <p class="social-proof-live">
+    <p class="social-proof-live" id="live-status">
       <span class="live-dot"></span>
-      Ao vivo agora: monitorando <strong>&nbsp;BTS São Paulo 28/10 • 30/10 • 31/10</strong>
+      <span id="live-text">Carregando status...</span>
     </p>
   </div>
 </section>
@@ -638,7 +638,7 @@
     <div class="form-wrap">
       <div id="form-content">
         <p class="form-title">Entrar na lista gratuita</p>
-        <p class="form-sub">Seja notificado quando o TicketRadar lançar para o público.</p>
+        <p class="form-sub">Os primeiros 500 garantem acesso gratuito vitalício assim que o produto lançar.</p>
 
         <form id="waitlist-form" novalidate>
           <div class="form-group">
@@ -710,7 +710,7 @@
       <div class="success-msg" id="success-msg">
         <div class="success-icon">✅</div>
         <div class="success-title">Você está na lista!</div>
-        <p class="success-sub">Te avisamos quando lançar. Fique de olho no seu e-mail e WhatsApp — chega antes do show abrir.</p>
+        <p class="success-sub">Você está na lista de espera! Assim que lançarmos, você será um dos primeiros a receber acesso — e seus alertas reais começam aí. Fique de olho no seu e-mail.</p>
       </div>
     </div>
   </div>
@@ -739,7 +739,7 @@
           <span class="faq-arrow">▼</span>
         </button>
         <div class="faq-a">
-          Monitoramos as páginas dos eventos a cada 30 segundos e enviamos uma notificação imediata via SMS, e-mail ou WhatsApp assim que detectamos disponibilidade de ingressos. Você age antes de qualquer um.
+          Assim que o produto lançar, você será um dos primeiros notificados. Os usuários da waitlist têm acesso prioritário e gratuito vitalício — alertas reais via SMS, e-mail ou WhatsApp começam no lançamento.
         </div>
       </div>
 
@@ -832,9 +832,7 @@
 
     const name    = document.getElementById('f-name').value.trim();
     const email   = document.getElementById('f-email').value.trim();
-    const wa      = document.getElementById('f-wa').value.trim();
     const consent = document.getElementById('f-consent').checked;
-    const marketing = document.getElementById('f-marketing').checked;
 
     // Coleta categorias selecionadas
     const categories = Array.from(
@@ -854,9 +852,16 @@
     if (!consent) {
       consentLabel.classList.add('consent-error');
       document.getElementById('err-consent').style.display = 'block';
+      consentLabel.style.outline = '1px solid var(--primary)';
+      consentLabel.style.borderRadius = '6px';
+      consentLabel.style.padding = '4px';
+      consentLabel.scrollIntoView({ behavior: 'smooth', block: 'center' });
       valid = false;
     } else {
       consentLabel.classList.remove('consent-error');
+      consentLabel.style.outline = '';
+      consentLabel.style.borderRadius = '';
+      consentLabel.style.padding = '';
       document.getElementById('err-consent').style.display = 'none';
     }
 
@@ -865,31 +870,38 @@
     submitBtn.disabled = true;
     submitBtn.textContent = 'Enviando…';
 
+    // Esconder erro anterior se existir
+    const apiErrEl = document.getElementById('api-error');
+    if (apiErrEl) apiErrEl.style.display = 'none';
+
     try {
-      // C1: POST real para /api/waitlist com payload completo incluindo consentimentos
+      const ctrl = new AbortController();
+      const timeout = setTimeout(() => ctrl.abort(), 8000);
+
       const response = await fetch('/api/waitlist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: ctrl.signal,
         body: JSON.stringify({
           name,
           email,
-          whatsapp: wa,
+          whatsapp: document.getElementById('f-wa').value.trim(),
           categories,
-          consent_terms: consent,        // LGPD — base legal obrigatória
-          consent_marketing: marketing,  // marketing — opcional
+          consent_terms: consent,
+          consent_marketing: document.getElementById('f-marketing')?.checked || false,
         }),
       });
+      clearTimeout(timeout);
 
       if (!response.ok) {
-        // A4: trata erros HTTP (4xx, 5xx) com mensagem inline
+        const err = await response.json().catch(() => ({}));
         let msg = '😕 Algo deu errado. Tente novamente.';
         if (response.status === 429) {
           msg = '⏱️ Muitas tentativas. Aguarde 1 minuto e tente novamente.';
+        } else if (err.error && err.error.length < 100) {
+          msg = '⚠️ ' + err.error;
         } else if (response.status === 400) {
-          try {
-            const data = await response.json();
-            if (data.error) msg = '⚠️ ' + data.error;
-          } catch (_) {}
+          msg = '⚠️ Dados inválidos. Verifique o formulário.';
         }
         showApiError(true, msg);
         submitBtn.disabled = false;
@@ -902,10 +914,14 @@
       successMsg.classList.add('show');
 
     } catch (err) {
-      // A4: trata falha de rede com mensagem inline
-      showApiError(true, '😕 Não foi possível conectar. Verifique sua conexão e tente novamente.');
       submitBtn.disabled = false;
       submitBtn.textContent = '🎟️ Garantir meu lugar na fila';
+
+      let msg = '😕 Algo deu errado. Tente novamente em instantes.';
+      if (err.name === 'AbortError') msg = '⏱️ Servidor demorou demais. Verifique sua conexão e tente novamente.';
+      else if (err.message && err.message.length < 100) msg = '😕 ' + err.message;
+
+      showApiError(true, msg);
     }
   });
 
@@ -920,10 +936,44 @@
   // Limpa erro de consentimento ao marcar
   document.getElementById('f-consent').addEventListener('change', () => {
     if (document.getElementById('f-consent').checked) {
-      document.getElementById('consent-terms-label').classList.remove('consent-error');
+      const lbl = document.getElementById('consent-terms-label');
+      lbl.classList.remove('consent-error');
+      lbl.style.outline = '';
+      lbl.style.borderRadius = '';
+      lbl.style.padding = '';
       document.getElementById('err-consent').style.display = 'none';
     }
   });
+
+  // ── STATUS DINÂMICO — puxar de /api/status ──
+  async function loadLiveStatus() {
+    try {
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), 5000);
+      const r = await fetch('/api/status', { signal: ctrl.signal });
+      if (!r.ok) throw new Error();
+      const data = await r.json();
+
+      const available = Object.entries(data)
+        .filter(([, s]) => s !== 'SOLD_OUT' && s !== 'UNKNOWN')
+        .map(([label]) => label);
+
+      const total = Object.keys(data).length;
+      const el = document.getElementById('live-text');
+
+      if (available.length > 0) {
+        el.innerHTML = `Disponível agora: <strong>${available.join(' • ')}</strong>`;
+        document.querySelector('.live-dot').style.background = 'var(--success)';
+      } else if (total > 0) {
+        el.innerHTML = `Monitorando <strong>${total} evento${total > 1 ? 's' : ''}</strong> em tempo real`;
+      } else {
+        document.getElementById('live-status').style.display = 'none';
+      }
+    } catch {
+      document.getElementById('live-status').style.display = 'none';
+    }
+  }
+  loadLiveStatus();
 </script>
 </body>
 </html>

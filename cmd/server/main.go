@@ -6,15 +6,28 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/victorgsrocha/ticketradar/internal/monitor"
 	"github.com/victorgsrocha/ticketradar/internal/notify"
 	"github.com/victorgsrocha/ticketradar/internal/store"
 )
+
+// emailRegex valida formato de email — RFC 5321 simplificado.
+// S1: impede persistência de dados claramente inválidos.
+var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+
+// whatsappRegex valida número de WhatsApp — apenas + e dígitos, 7–15 dígitos.
+var whatsappRegex = regexp.MustCompile(`^\+?[0-9]{7,15}$`)
+
+// htmlTagsRegex detecta tags HTML para sanitizar campos de texto livre.
+var htmlTagsRegex = regexp.MustCompile(`[<>]`)
 
 type Config struct {
 	notify.Config
@@ -23,6 +36,8 @@ type Config struct {
 	Interval      time.Duration
 	AllowedOrigin string // C2: origem explícita para CORS
 	DeleteToken   string // C3: token para autorizar DELETE
+	AdminUser     string // S2: usuário para Basic Auth das rotas admin
+	AdminPass     string // S2: senha para Basic Auth das rotas admin (obrigatório em prod)
 }
 
 func loadConfig() Config {
@@ -47,6 +62,8 @@ func loadConfig() Config {
 		Interval:      interval,
 		AllowedOrigin: os.Getenv("ALLOWED_ORIGIN"), // C2: vazio = sem CORS header
 		DeleteToken:   os.Getenv("DELETE_TOKEN"),   // C3: obrigatório para DELETE
+		AdminUser:     getEnv("ADMIN_USER", "admin"),
+		AdminPass:     os.Getenv("ADMIN_PASS"), // S2: obrigatório em prod — vazio retorna 503
 	}
 }
 
@@ -134,6 +151,56 @@ func maskEmail(email string) string {
 	return local[:3] + "***@" + domain
 }
 
+// ── Input Validation ──────────────────────────────────────────────────────────
+
+// validationError descreve um erro de validação com campo específico.
+// S1: retorna 422 com campo e mensagem para que o cliente possa exibir feedback preciso.
+type validationError struct {
+	Field   string `json:"field"`
+	Message string `json:"error"`
+}
+
+func (e *validationError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Field, e.Message)
+}
+
+// validateWaitlistInput valida os campos de entrada antes de persistir no banco.
+// S1: impede XSS via HTML injection, emails malformados e números inválidos.
+func validateWaitlistInput(name, email, whatsapp, categories string) *validationError {
+	// Email: obrigatório, max 254 chars (RFC 5321), formato válido
+	if utf8.RuneCountInString(email) > 254 {
+		return &validationError{Field: "email", Message: "email muito longo (máx. 254 caracteres)"}
+	}
+	if !emailRegex.MatchString(email) {
+		return &validationError{Field: "email", Message: "email inválido"}
+	}
+
+	// Name: max 100 chars, sem tags HTML
+	if utf8.RuneCountInString(name) > 100 {
+		return &validationError{Field: "name", Message: "nome muito longo (máx. 100 caracteres)"}
+	}
+	if htmlTagsRegex.MatchString(name) {
+		return &validationError{Field: "name", Message: "nome contém caracteres não permitidos"}
+	}
+
+	// WhatsApp: opcional — se informado, valida formato
+	if whatsapp != "" {
+		if utf8.RuneCountInString(whatsapp) > 20 {
+			return &validationError{Field: "whatsapp", Message: "whatsapp muito longo (máx. 20 caracteres)"}
+		}
+		if !whatsappRegex.MatchString(whatsapp) {
+			return &validationError{Field: "whatsapp", Message: "whatsapp inválido (use formato +5511999999999)"}
+		}
+	}
+
+	// Categories: max 200 chars
+	if utf8.RuneCountInString(categories) > 200 {
+		return &validationError{Field: "categories", Message: "categorias muito longas (máx. 200 caracteres)"}
+	}
+
+	return nil
+}
+
 // ── Scheduler ────────────────────────────────────────────────────────────────
 
 type Scheduler struct {
@@ -190,11 +257,11 @@ func (s *Scheduler) checkOne(event monitor.Event) {
 	_ = s.db.LogStatus(event.URL, event.Label, string(result.Status))
 
 	// Incrementa contador de checks
-	prev_count := int64(0)
+	prevCount := int64(0)
 	if v, ok := s.totalChecks.Load(event.URL); ok {
-		prev_count = v.(int64)
+		prevCount = v.(int64)
 	}
-	s.totalChecks.Store(event.URL, prev_count+1)
+	s.totalChecks.Store(event.URL, prevCount+1)
 
 	icon := "❌"
 	if result.Status.IsAvailable() {
@@ -210,14 +277,76 @@ func (s *Scheduler) checkOne(event monitor.Event) {
 			Status:     string(result.Status),
 			DetectedAt: result.CheckedAt.Format("02/01 15:04:05"),
 		}
+
+		// Notifica o dono do sistema (Victor) por todos os canais
 		errs := notify.SendAll(s.cfg.Config, alert)
 		for _, e := range errs {
-			log.Printf("[%s] erro ao notificar: %v", event.Label, e)
+			log.Printf("[%s] erro ao notificar owner: %v", event.Label, e)
 		}
 		if len(errs) == 0 {
-			log.Printf("[%s] ✅ Alertas enviados!", event.Label)
+			log.Printf("[%s] ✅ Alertas owner enviados!", event.Label)
 		}
+
+		// Notifica TODOS os usuários da waitlist em goroutine separada
+		go s.notifyWaitlist(event, alert)
 	}
+}
+
+// notifyWaitlist envia alertas para todos os usuários da waitlist com deduplicação e rate limiting.
+// Sprint 2: chamado em goroutine separada para não bloquear o loop principal do scheduler.
+// Rate limiting: máx 10 envios simultâneos para não saturar o SMTP.
+// Deduplicação: ignora usuários já alertados nas últimas 2h (evita spam em oscilações).
+func (s *Scheduler) notifyWaitlist(event monitor.Event, alert notify.Alert) {
+	emails, err := s.db.GetWaitlistEmails()
+	if err != nil {
+		log.Printf("erro ao buscar emails da waitlist: %v", err)
+		return
+	}
+
+	if len(emails) == 0 {
+		log.Printf("[%s] waitlist vazia — sem usuários para notificar", event.Label)
+		return
+	}
+
+	log.Printf("[%s] 📢 notificando %d usuários da waitlist...", event.Label, len(emails))
+
+	// Rate limiting de envio: máx 10 emails simultâneos — protege o SMTP
+	sem := make(chan struct{}, 10)
+	var wg sync.WaitGroup
+
+	for _, email := range emails {
+		// Verificar deduplicação: não enviar se já alertou nas últimas 2h
+		alerted, err := s.db.HasBeenAlerted(email, event.URL, 2)
+		if err != nil {
+			log.Printf("erro ao verificar alert_log: %v", err)
+			continue
+		}
+		if alerted {
+			continue
+		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(toEmail string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if err := notify.SendAllToUser(s.cfg.Config, toEmail, alert); err != nil {
+				log.Printf("erro ao notificar %s: %v", maskEmail(toEmail), err)
+				return
+			}
+
+			// Registrar no alert_log — base para deduplicação futura
+			if err := s.db.RecordAlert(toEmail, event.URL); err != nil {
+				log.Printf("erro ao registrar alert_log: %v", err)
+			}
+
+			log.Printf("[%s] ✅ alertado: %s", event.Label, maskEmail(toEmail))
+		}(email)
+	}
+
+	wg.Wait()
+	log.Printf("[%s] 📢 envio para waitlist concluído", event.Label)
 }
 
 // ── Middlewares ───────────────────────────────────────────────────────────────
@@ -245,6 +374,8 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		// Não envia Referer para origens externas
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		// HSTS: força HTTPS por 1 ano, inclui subdomínios
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		// CSP básico: só recursos próprios + Google Fonts
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; "+
@@ -278,6 +409,56 @@ func corsMiddleware(allowedOrigin string) func(http.Handler) http.Handler {
 	}
 }
 
+// basicAuthMiddlewareFn retorna um middleware que exige Basic Auth.
+// S2: protege rotas internas sensíveis (/api/metrics, /api/history, /admin/events).
+// Se ADMIN_PASS estiver vazio, retorna 503 com mensagem clara — fail-secure.
+func basicAuthMiddlewareFn(adminUser, adminPass string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Fail-secure: se a senha não foi configurada, o endpoint é inacessível
+			if adminPass == "" {
+				http.Error(w, `{"error":"serviço indisponível — ADMIN_PASS não configurado"}`, http.StatusServiceUnavailable)
+				return
+			}
+			user, pass, ok := r.BasicAuth()
+			if !ok || user != adminUser || pass != adminPass {
+				w.Header().Set("WWW-Authenticate", `Basic realm="TicketRadar Admin"`)
+				http.Error(w, `{"error":"acesso restrito"}`, http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// protectedFileHandler envolve o FileServer e intercepta paths sensíveis,
+// exigindo Basic Auth antes de servi-los.
+// S2: impede acesso público ao dashboard.html, docs.html e openapi.yaml.
+func protectedFileHandler(dir http.FileSystem, adminUser, adminPass string) http.Handler {
+	fs := http.FileServer(dir)
+	protected := map[string]bool{
+		"/dashboard.html": true,
+		"/docs.html":      true,
+		"/openapi.yaml":   true,
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if protected[r.URL.Path] {
+			// Fail-secure: sem senha configurada, o arquivo não é servido
+			if adminPass == "" {
+				http.Error(w, "Serviço indisponível — ADMIN_PASS não configurado", http.StatusServiceUnavailable)
+				return
+			}
+			user, pass, ok := r.BasicAuth()
+			if !ok || user != adminUser || pass != adminPass {
+				w.Header().Set("WWW-Authenticate", `Basic realm="TicketRadar Admin"`)
+				http.Error(w, "Acesso restrito", http.StatusUnauthorized)
+				return
+			}
+		}
+		fs.ServeHTTP(w, r)
+	})
+}
+
 // chain encadeia múltiplos middlewares (aplicados de fora para dentro)
 func chain(h http.Handler, middlewares ...func(http.Handler) http.Handler) http.Handler {
 	for i := len(middlewares) - 1; i >= 0; i-- {
@@ -288,14 +469,14 @@ func chain(h http.Handler, middlewares ...func(http.Handler) http.Handler) http.
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
-func waitlistHandler(db *store.DB, rl *rateLimiter, deleteToken string) http.HandlerFunc {
+func waitlistHandler(db *store.DB, rl *rateLimiter, cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		// LGPD — Direito ao Esquecimento (Art. 18, IV)
 		if r.Method == http.MethodDelete {
 			// C3: DELETE requer token de autorização via header X-Delete-Token
-			if deleteToken == "" || r.Header.Get("X-Delete-Token") != deleteToken {
+			if cfg.DeleteToken == "" || r.Header.Get("X-Delete-Token") != cfg.DeleteToken {
 				http.Error(w, `{"error":"não autorizado"}`, http.StatusUnauthorized)
 				return
 			}
@@ -330,6 +511,9 @@ func waitlistHandler(db *store.DB, rl *rateLimiter, deleteToken string) http.Han
 			return
 		}
 
+		// S3: limita body a 4KB para prevenir DoS por payload gigante
+		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+
 		var body struct {
 			Name       string `json:"name"`
 			Email      string `json:"email"`
@@ -341,18 +525,30 @@ func waitlistHandler(db *store.DB, rl *rateLimiter, deleteToken string) http.Han
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			// MaxBytesReader retorna erro específico quando o limite é excedido
+			if err.Error() == "http: request body too large" {
+				http.Error(w, `{"error":"payload muito grande (máx. 4KB)"}`, http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, `{"error":"json inválido"}`, http.StatusBadRequest)
 			return
 		}
 
 		if body.Email == "" {
-			http.Error(w, `{"error":"email obrigatório"}`, http.StatusBadRequest)
+			http.Error(w, `{"error":"email obrigatório","field":"email"}`, http.StatusBadRequest)
 			return
 		}
 
 		// LGPD Art. 7 — base legal: consentimento
 		if !body.ConsentTerms {
 			http.Error(w, `{"error":"aceite dos termos obrigatório (LGPD Art. 7)"}`, http.StatusBadRequest)
+			return
+		}
+
+		// S1: validação de entrada antes de persistir
+		if ve := validateWaitlistInput(body.Name, body.Email, body.WhatsApp, body.Categories); ve != nil {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(ve)
 			return
 		}
 
@@ -366,6 +562,13 @@ func waitlistHandler(db *store.DB, rl *rateLimiter, deleteToken string) http.Han
 		count, _ := db.WaitlistCount()
 		// C5: email mascarado no log
 		log.Printf("📧 Novo cadastro: %s (%s) — total: %d", body.Name, maskEmail(body.Email), count)
+
+		// Sprint 1: envia email de boas-vindas em background — não bloqueia a response
+		go func() {
+			if err := notify.SendWelcomeEmail(cfg.Config, body.Email, body.Name); err != nil {
+				log.Printf("erro ao enviar email de boas-vindas para %s: %v", maskEmail(body.Email), err)
+			}
+		}()
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"ok":      true,
@@ -440,8 +643,13 @@ func statusHandler(s *Scheduler) http.HandlerFunc {
 }
 
 // healthHandler — para Railway/uptime checks
+// Aceita apenas GET — métodos distintos retornam 405.
 func healthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"método não permitido"}`, http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": "1.0.0"})
 	}
@@ -462,9 +670,9 @@ func metricsHandler(s *Scheduler) http.HandlerFunc {
 		uptimeSeconds := int64(time.Since(s.startedAt).Seconds())
 
 		json.NewEncoder(w).Encode(map[string]any{
-			"waitlist_count":  waitlistCount,
-			"total_checks":    totalChecks,
-			"uptime_seconds":  uptimeSeconds,
+			"waitlist_count":   waitlistCount,
+			"total_checks":     totalChecks,
+			"uptime_seconds":   uptimeSeconds,
 			"events_monitored": len(s.events),
 		})
 	}
@@ -492,6 +700,89 @@ func historyHandler(db *store.DB) http.HandlerFunc {
 	}
 }
 
+// adminEventsHandler gerencia os eventos monitorados via API REST.
+// Sprint 2: permite adicionar/desativar eventos sem redeploy.
+//
+//	GET    /admin/events       — lista todos os eventos (ativos e inativos)
+//	POST   /admin/events       — adiciona novo evento (com SSRF check obrigatório)
+//	DELETE /admin/events?id=X  — desativa evento por ID (soft delete)
+//
+// Protegido por basicAuthMiddlewareFn — nunca expor sem ADMIN_PASS configurado.
+func adminEventsHandler(db *store.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.Method {
+
+		case http.MethodGet:
+			events, err := db.ListAllEvents()
+			if err != nil {
+				http.Error(w, `{"error":"erro interno"}`, http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(events)
+
+		case http.MethodPost:
+			// S3: limita body a 2KB
+			r.Body = http.MaxBytesReader(w, r.Body, 2048)
+
+			var body struct {
+				Label    string `json:"label"`
+				URL      string `json:"url"`
+				Platform string `json:"platform"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, `{"error":"json inválido"}`, http.StatusBadRequest)
+				return
+			}
+
+			if body.Label == "" || body.URL == "" {
+				http.Error(w, `{"error":"label e url são obrigatórios"}`, http.StatusBadRequest)
+				return
+			}
+
+			// SSRF protection: valida domínio antes de persistir — obrigatório
+			if !monitor.IsAllowedURL(body.URL) {
+				log.Printf("⚠️  tentativa de adicionar URL fora da allowlist: %s", body.URL)
+				http.Error(w, `{"error":"domínio não permitido — apenas plataformas de ingressos conhecidas são aceitas"}`, http.StatusUnprocessableEntity)
+				return
+			}
+
+			if err := db.AddEvent(body.Label, body.URL, body.Platform); err != nil {
+				log.Printf("erro ao adicionar evento: %v", err)
+				http.Error(w, `{"error":"erro interno — possivelmente URL duplicada"}`, http.StatusInternalServerError)
+				return
+			}
+
+			log.Printf("🎟️  admin: evento adicionado — %q (%s)", body.Label, body.URL)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "message": "Evento adicionado com sucesso."})
+
+		case http.MethodDelete:
+			idStr := r.URL.Query().Get("id")
+			if idStr == "" {
+				http.Error(w, `{"error":"parâmetro id obrigatório"}`, http.StatusBadRequest)
+				return
+			}
+			id, err := strconv.ParseInt(idStr, 10, 64)
+			if err != nil || id <= 0 {
+				http.Error(w, `{"error":"id inválido"}`, http.StatusBadRequest)
+				return
+			}
+			if err := db.DeactivateEvent(id); err != nil {
+				log.Printf("erro ao desativar evento id=%d: %v", id, err)
+				http.Error(w, `{"error":"evento não encontrado ou erro interno"}`, http.StatusNotFound)
+				return
+			}
+			log.Printf("🗑️  admin: evento id=%d desativado", id)
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "message": "Evento desativado."})
+
+		default:
+			http.Error(w, `{"error":"método não permitido"}`, http.StatusMethodNotAllowed)
+		}
+	}
+}
+
 func main() {
 	cfg := loadConfig()
 
@@ -507,11 +798,25 @@ func main() {
 	if cfg.AllowedOrigin == "" {
 		log.Println("⚠️  AVISO: ALLOWED_ORIGIN não definido — CORS headers não serão emitidos")
 	}
+	if cfg.AdminPass == "" {
+		log.Println("⚠️  AVISO: ADMIN_PASS não definido — rotas admin retornarão 503 (fail-secure)")
+	}
 
-	events := []monitor.Event{
+	// Sprint 2: eventos padrão BTS — seed no banco se ainda não existirem
+	defaultEvents := []monitor.Event{
 		{ID: "bts-28", Label: "BTS 28/10", URL: "https://www.ticketmaster.com.br/event/venda-geral-bts-world-tour-arirang-28-10"},
 		{ID: "bts-30", Label: "BTS 30/10", URL: "https://www.ticketmaster.com.br/event/venda-geral-bts-world-tour-arirang-30-10"},
 		{ID: "bts-31", Label: "BTS 31/10", URL: "https://www.ticketmaster.com.br/event/venda-geral-bts-world-tour-arirang-31-10"},
+	}
+	if err := db.SeedDefaultEvents(defaultEvents); err != nil {
+		log.Printf("⚠️  erro ao seed events: %v", err)
+	}
+
+	// Sprint 2: carrega eventos ativos do banco ao invés de lista hardcoded
+	events, err := db.GetActiveEvents()
+	if err != nil || len(events) == 0 {
+		log.Printf("⚠️  usando eventos padrão (banco vazio ou erro: %v)", err)
+		events = defaultEvents
 	}
 
 	// A3: rate limiter global — 5 requests/min por IP no /api/waitlist
@@ -520,14 +825,26 @@ func main() {
 	scheduler := &Scheduler{cfg: cfg, db: db, events: events, startedAt: time.Now()}
 	go scheduler.run()
 
+	// Middleware de Basic Auth para rotas de API internas
+	adminAuth := basicAuthMiddlewareFn(cfg.AdminUser, cfg.AdminPass)
+
 	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.Dir("./web")))
-	mux.HandleFunc("/api/waitlist", waitlistHandler(db, rl, cfg.DeleteToken))
+
+	// FileServer com proteção para arquivos sensíveis
+	mux.Handle("/", protectedFileHandler(http.Dir("./web"), cfg.AdminUser, cfg.AdminPass))
+
+	// Rotas públicas
+	mux.HandleFunc("/api/waitlist", waitlistHandler(db, rl, cfg))
 	mux.HandleFunc("/api/me", meHandler(db, cfg.DeleteToken))
 	mux.HandleFunc("/api/status", statusHandler(scheduler))
 	mux.HandleFunc("/health", healthHandler())
-	mux.HandleFunc("/api/metrics", metricsHandler(scheduler))
-	mux.HandleFunc("/api/history", historyHandler(db))
+
+	// Rotas internas protegidas por Basic Auth
+	mux.Handle("/api/metrics", adminAuth(http.HandlerFunc(metricsHandler(scheduler))))
+	mux.Handle("/api/history", adminAuth(http.HandlerFunc(historyHandler(db))))
+
+	// Sprint 2: endpoint admin para gerenciar eventos (CRUD com SSRF protection)
+	mux.Handle("/admin/events", adminAuth(http.HandlerFunc(adminEventsHandler(db))))
 
 	// Middlewares encadeados (ordem de aplicação: requestID → security headers → CORS → handler)
 	handler := chain(
