@@ -17,8 +17,10 @@ WORKDIR /app
 COPY --from=builder /app/bin/ticketradar .
 COPY --from=builder /app/web ./web
 
-# Não rode como root (segurança)
-RUN addgroup -S ticketradar && adduser -S ticketradar -G ticketradar
+# Criar usuário não-root e diretório /data com permissões corretas
+RUN addgroup -S ticketradar && adduser -S ticketradar -G ticketradar && \
+    mkdir -p /data && chown ticketradar:ticketradar /data
+
 USER ticketradar
 
 EXPOSE 8080
