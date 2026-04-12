@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -52,9 +53,7 @@ var (
 	httpClient    = &http.Client{Timeout: 15 * time.Second}
 )
 
-// allowedDomains — SSRF protection: apenas domínios de plataformas de ingressos conhecidas.
-// Sprint 2: impede que um atacante injete URLs arbitrárias via /admin/events
-// para fazer o servidor realizar requests internos (SSRF).
+// allowedDomains — SSRF protection
 var allowedDomains = []string{
 	"ticketmaster.com.br",
 	"eventim.com.br",
@@ -65,14 +64,11 @@ var allowedDomains = []string{
 }
 
 // IsAllowedURL verifica se a URL pertence a um domínio da allowlist.
-// Exportada para uso em main.go (validação no endpoint /admin/events).
-// Proteção: normaliza o host para lowercase antes de comparar.
 func IsAllowedURL(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
-	// Garante esquema HTTP/HTTPS — rejeita file://, ftp://, etc.
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return false
@@ -89,10 +85,25 @@ func IsAllowedURL(rawURL string) bool {
 	return false
 }
 
+// userAgents para rotacionar entre requests e reduzir bot fingerprinting.
+var userAgents = []string{
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+}
+
+var uaCounter int64
+
+func nextUserAgent() string {
+	idx := atomic.AddInt64(&uaCounter, 1) % int64(len(userAgents))
+	return userAgents[idx]
+}
+
 // Check faz uma requisição à página do evento e retorna o salesStatus.
-// SSRF protection: valida o domínio da URL antes de realizar o request.
+// Trata 403 (WAF/bot protection) sem propagar como erro — retorna UNKNOWN sem alterar o status anterior.
 func Check(event Event, previous Status) (CheckResult, error) {
-	// SSRF: rejeita URLs fora da allowlist antes de qualquer I/O
 	if !IsAllowedURL(event.URL) {
 		return CheckResult{}, fmt.Errorf("domínio não permitido: %s", event.URL)
 	}
@@ -102,9 +113,17 @@ func Check(event Event, previous Status) (CheckResult, error) {
 		return CheckResult{}, fmt.Errorf("criar request: %w", err)
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
-	req.Header.Set("Accept-Language", "pt-BR,pt;q=0.9,en;q=0.8")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	// Headers que imitam um browser real para reduzir bloqueio por WAF
+	req.Header.Set("User-Agent", nextUserAgent())
+	req.Header.Set("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -112,18 +131,28 @@ func Check(event Event, previous Status) (CheckResult, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024)) // max 512KB
+	// 403 / 429 = WAF ou rate limit — não é falha do código, não alterar status anterior
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		log.Printf("[MONITOR] %s: bloqueado pelo WAF (HTTP %d) — mantendo status anterior (%s)",
+			event.Label, resp.StatusCode, previous)
+		return CheckResult{
+			Event:     event,
+			Status:    previous, // preserva o último status conhecido
+			CheckedAt: time.Now(),
+			Changed:   false,
+		}, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return CheckResult{}, fmt.Errorf("HTTP %d inesperado", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	if err != nil {
 		return CheckResult{}, fmt.Errorf("ler body: %w", err)
 	}
 
 	status := extractStatus(string(body))
-
-	// Debug temporário: logar quando retornar UNKNOWN para diagnóstico em produção
-	if status == StatusUnknown {
-		log.Printf("[DEBUG] %s: body=%dB, HTTP=%d, primeiros100=%q",
-			event.Label, len(body), resp.StatusCode, string(body[:min(100, len(body))]))
-	}
 	result := CheckResult{
 		Event:     event,
 		Status:    status,
@@ -156,11 +185,4 @@ func extractStatus(body string) Status {
 	default:
 		return StatusUnknown
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
