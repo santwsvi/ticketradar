@@ -439,6 +439,22 @@ func (db *DB) RecentStatusLogs(limit int) ([]map[string]string, error) {
 	return entries, nil
 }
 
+// LastStatusForEvent retorna o status mais recente registrado para um evento.
+// Usado no startup para pré-carregar a sync.Map e evitar UNKNOWN quando o WAF bloqueia.
+func (db *DB) LastStatusForEvent(eventURL string) (string, error) {
+	var status string
+	err := db.conn.QueryRow(
+		`SELECT status FROM status_log WHERE event_url = ?
+		 AND status != 'UNKNOWN'
+		 ORDER BY logged_at DESC LIMIT 1`,
+		eventURL,
+	).Scan(&status)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return status, err
+}
+
 func (db *DB) Close() error {
 	return db.conn.Close()
 }

@@ -50,7 +50,15 @@ type CheckResult struct {
 
 var (
 	salesStatusRe = regexp.MustCompile(`"salesStatus"\s*:\s*"([^"]+)"`)
-	httpClient    = &http.Client{Timeout: 15 * time.Second}
+	// DisableCompression: força resposta não comprimida.
+	// A Ticketmaster com gzip retorna o salesStatus além de 30KB — que é cortado pelo LimitReader.
+	// Sem compressão, a resposta completa (~169KB) chega de uma vez e o salesStatus é encontrado.
+	httpClient = &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			DisableCompression: true,
+		},
+	}
 )
 
 // allowedDomains — SSRF protection
@@ -113,11 +121,11 @@ func Check(event Event, previous Status) (CheckResult, error) {
 		return CheckResult{}, fmt.Errorf("criar request: %w", err)
 	}
 
-	// Headers que imitam um browser real para reduzir bloqueio por WAF
+	// Headers que imitam um browser real — sem Accept-Encoding
+	// (evita gzip que corta o body antes do salesStatus)
 	req.Header.Set("User-Agent", nextUserAgent())
 	req.Header.Set("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Pragma", "no-cache")
 	req.Header.Set("Sec-Fetch-Dest", "document")

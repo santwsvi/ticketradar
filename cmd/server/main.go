@@ -223,6 +223,10 @@ func (s *Scheduler) run() {
 	purgeTicker := time.NewTicker(1 * time.Hour)
 	defer purgeTicker.Stop()
 
+	// Pré-carregar último status conhecido do banco para evitar UNKNOWN no startup
+	// Crítico: se o WAF bloqueia no primeiro check, preservamos o estado anterior
+	s.preloadStatusesFromDB()
+
 	log.Printf("🎟️ TicketRadar iniciado — checando %d eventos a cada %s", len(s.events), s.cfg.Interval)
 	s.checkAll()
 
@@ -235,6 +239,19 @@ func (s *Scheduler) run() {
 				log.Printf("⚠️  erro ao purgar status_log: %v", err)
 			}
 		}
+	}
+}
+
+// preloadStatusesFromDB carrega o último status conhecido de cada evento do banco.
+// Evita que /api/status retorne UNKNOWN no startup quando o WAF bloqueia os primeiros checks.
+func (s *Scheduler) preloadStatusesFromDB() {
+	for _, event := range s.events {
+		last, err := s.db.LastStatusForEvent(event.URL)
+		if err != nil || last == "" {
+			continue
+		}
+		s.statuses.Store(event.URL, monitor.Status(last))
+		log.Printf("[startup] %s: status inicial carregado do banco: %s", event.Label, last)
 	}
 }
 
