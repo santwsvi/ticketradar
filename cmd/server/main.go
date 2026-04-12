@@ -379,11 +379,12 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 		// CSP básico: só recursos próprios + Google Fonts
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; "+
-				"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "+
+				"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; "+
 				"font-src 'self' https://fonts.gstatic.com; "+
-				"script-src 'self' 'unsafe-inline'; "+
-				"img-src 'self' data:; "+
-				"connect-src 'self'")
+				"script-src 'self' 'unsafe-inline' https://unpkg.com; "+
+				"img-src 'self' data: https://unpkg.com; "+
+				"connect-src 'self' https://ticketradar.com.br https://ticketradar-production-f6a4.up.railway.app; "+
+				"worker-src blob:")
 		next.ServeHTTP(w, r)
 	})
 }
