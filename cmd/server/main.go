@@ -963,11 +963,20 @@ func metricsHandler(s *Scheduler) http.HandlerFunc {
 		waitlistCount, _ := s.db.WaitlistCount()
 		uptimeSeconds := int64(time.Since(s.startedAt).Seconds())
 
+		// Debug: estado atual da sync.Map de statuses
+		statusMap := make(map[string]string)
+		s.statuses.Range(func(k, v any) bool {
+			statusMap[k.(string)] = string(v.(monitor.Status))
+			return true
+		})
+
 		json.NewEncoder(w).Encode(map[string]any{
 			"waitlist_count":   waitlistCount,
 			"total_checks":     totalChecks,
 			"uptime_seconds":   uptimeSeconds,
 			"events_monitored": len(s.events),
+			"statuses_in_map":  statusMap,
+			"events_urls":      func() []string { urls := make([]string, len(s.events)); for i, e := range s.events { urls[i] = e.URL }; return urls }(),
 		})
 	}
 }
