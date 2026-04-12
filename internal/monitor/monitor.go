@@ -3,6 +3,7 @@ package monitor
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -117,6 +118,12 @@ func Check(event Event, previous Status) (CheckResult, error) {
 	}
 
 	status := extractStatus(string(body))
+
+	// Debug temporário: logar quando retornar UNKNOWN para diagnóstico em produção
+	if status == StatusUnknown {
+		log.Printf("[DEBUG] %s: body=%dB, HTTP=%d, primeiros100=%q",
+			event.Label, len(body), resp.StatusCode, string(body[:min(100, len(body))]))
+	}
 	result := CheckResult{
 		Event:     event,
 		Status:    status,
@@ -149,4 +156,11 @@ func extractStatus(body string) Status {
 	default:
 		return StatusUnknown
 	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
