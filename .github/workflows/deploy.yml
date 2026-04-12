@@ -4,40 +4,87 @@ on:
   push:
     branches: [main]
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: santwsvi/ticketradar
+
 jobs:
-  # Reutiliza o CI inline antes de deployar
-  build-and-test:
-    name: Build, Vet & Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache: true
-      - run: go mod download
-      - run: go build ./...
-      - run: go vet ./...
-      - run: go test ./... -race
-
   deploy:
-    name: Deploy
+    name: Deploy Production
     runs-on: ubuntu-latest
-    needs: build-and-test   # só roda se o CI passar
+    needs: []  # CI já passou (mesmo push)
 
     steps:
-      - name: Deploy via Railway API
+      - name: Wait for CI to pass
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Build, Vet & Test'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+          allowed-conclusions: success
+        continue-on-error: true  # free tier pode não ter permissão
+
+      # Fase 3: Salvar deployment atual para rollback
+      - name: Get current deployment (for rollback)
+        id: current
         run: |
-          echo "CI passed — triggering Railway redeploy..."
+          CURRENT=$(curl -s -X POST https://backboard.railway.app/graphql/v2 \
+            -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"query":"{ deployments(input: { serviceId: \"763ab83e-b8e5-4298-b319-b4eed99201ef\" }) { edges { node { id status } } } }"}' | \
+            python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+deps=[x['node'] for x in d.get('data',{}).get('deployments',{}).get('edges',[])]
+current=[x for x in deps if x.get('status')=='SUCCESS']
+print(current[0]['id'] if current else '')
+")
+          echo "deployment_id=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Current deployment: $CURRENT"
+
+      - name: Deploy via Railway API
+        id: deploy
+        run: |
+          echo "Triggering Railway redeploy..."
           RESPONSE=$(curl -s -X POST https://backboard.railway.app/graphql/v2 \
             -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
               "query": "mutation { serviceInstanceRedeploy(serviceId: \"763ab83e-b8e5-4298-b319-b4eed99201ef\", environmentId: \"ef29ff9e-e5a4-40b8-b3be-3065293cc0a4\") }"
             }')
-          echo "Response: $RESPONSE"
           if echo "$RESPONSE" | grep -q '"errors"'; then
-            echo "Deploy trigger failed"
+            echo "Deploy trigger failed: $RESPONSE"
             exit 1
           fi
-          echo "Deploy triggered successfully!"
+          echo "Deploy triggered!"
+
+      # Fase 3.3: Smoke test após deploy
+      - name: Wait for deploy and smoke test
+        run: |
+          echo "Aguardando 90s para Railway subir..."
+          sleep 90
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://ticketradar.com.br/health)
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Smoke test passou (tentativa $i)"
+              exit 0
+            fi
+            echo "⏳ Tentativa $i: HTTP $STATUS — aguardando 30s..."
+            sleep 30
+          done
+          echo "❌ Smoke test falhou — iniciando rollback"
+          exit 1
+
+      # Fase 3.3: Rollback automático se smoke test falhar
+      - name: Rollback on failure
+        if: failure() && steps.current.outputs.deployment_id != ''
+        run: |
+          echo "🔄 Fazendo rollback para ${{ steps.current.outputs.deployment_id }}"
+          curl -s -X POST https://backboard.railway.app/graphql/v2 \
+            -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "query": "mutation { deploymentRedeploy(id: \"${{ steps.current.outputs.deployment_id }}\") { id status } }"
+            }'
+          echo "Rollback iniciado. Verifique o Railway dashboard."

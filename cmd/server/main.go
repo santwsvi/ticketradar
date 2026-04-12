@@ -14,6 +14,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/victorgsrocha/ticketradar/internal/logger"
+	"github.com/victorgsrocha/ticketradar/internal/metrics"
 	"github.com/victorgsrocha/ticketradar/internal/monitor"
 	"github.com/victorgsrocha/ticketradar/internal/notify"
 	"github.com/victorgsrocha/ticketradar/internal/store"
@@ -210,6 +212,7 @@ type Scheduler struct {
 	statuses    sync.Map
 	totalChecks sync.Map // map[string]int64 por URL
 	startedAt   time.Time
+	metrics     *metrics.Metrics
 }
 
 func (s *Scheduler) run() {
@@ -242,26 +245,41 @@ func (s *Scheduler) checkAll() {
 }
 
 func (s *Scheduler) checkOne(event monitor.Event) {
+	start := time.Now()
 	prev := monitor.StatusUnknown
 	if v, ok := s.statuses.Load(event.URL); ok {
 		prev = v.(monitor.Status)
 	}
 
 	result, err := monitor.Check(event, prev)
+	elapsed := time.Since(start).Seconds()
+
+	// Métricas de duração do check
+	if s.metrics != nil {
+		s.metrics.MonitorCheckDuration.WithLabelValues(event.Label).Observe(elapsed)
+	}
+
 	if err != nil {
 		log.Printf("[%s] ⚠️  erro: %v", event.Label, err)
+		if s.metrics != nil {
+			s.metrics.MonitorChecksTotal.WithLabelValues(event.Label, "error").Inc()
+		}
 		return
 	}
 
 	s.statuses.Store(event.URL, result.Status)
 	_ = s.db.LogStatus(event.URL, event.Label, string(result.Status))
 
-	// Incrementa contador de checks
+	// Incrementa contador de checks e métricas
 	prevCount := int64(0)
 	if v, ok := s.totalChecks.Load(event.URL); ok {
 		prevCount = v.(int64)
 	}
 	s.totalChecks.Store(event.URL, prevCount+1)
+
+	if s.metrics != nil {
+		s.metrics.MonitorChecksTotal.WithLabelValues(event.Label, string(result.Status)).Inc()
+	}
 
 	icon := "❌"
 	if result.Status.IsAvailable() {
@@ -282,9 +300,15 @@ func (s *Scheduler) checkOne(event monitor.Event) {
 		errs := notify.SendAll(s.cfg.Config, alert)
 		for _, e := range errs {
 			log.Printf("[%s] erro ao notificar owner: %v", event.Label, e)
+			if s.metrics != nil {
+				s.metrics.AlertsErrorTotal.WithLabelValues("all").Inc()
+			}
 		}
 		if len(errs) == 0 {
 			log.Printf("[%s] ✅ Alertas owner enviados!", event.Label)
+			if s.metrics != nil {
+				s.metrics.AlertsSentTotal.WithLabelValues("owner", event.Label).Inc()
+			}
 		}
 
 		// Notifica TODOS os usuários da waitlist em goroutine separada
@@ -643,6 +667,275 @@ func statusHandler(s *Scheduler) http.HandlerFunc {
 	}
 }
 
+// ── DB Admin Handlers ────────────────────────────────────────────────────────
+
+// adminDBUIHandler serve a interface web do DB Admin.
+// Protegido por Basic Auth — acessa o banco SQLite de produção.
+func adminDBUIHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(dbAdminHTML))
+	}
+}
+
+// adminDBQueryHandler executa uma query SQL somente-leitura.
+func adminDBQueryHandler(db *store.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"método não permitido"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Query == "" {
+			http.Error(w, `{"error":"query obrigatória"}`, http.StatusBadRequest)
+			return
+		}
+		result, err := db.AdminQuery(body.Query)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+// adminDBTablesHandler lista todas as tabelas do banco com contagem de linhas.
+func adminDBTablesHandler(db *store.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		tables, err := db.AdminQuery(
+			"SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+		if err != nil {
+			http.Error(w, `{"error":"erro ao listar tabelas"}`, http.StatusInternalServerError)
+			return
+		}
+		// Para cada tabela, pegar o COUNT(*)
+		type tableInfo struct {
+			Name  string `json:"name"`
+			Rows  int64  `json:"rows"`
+		}
+		var result []tableInfo
+		for _, row := range tables.Rows {
+			name := fmt.Sprintf("%v", row[0])
+			countResult, err := db.AdminQuery("SELECT COUNT(*) FROM " + name)
+			count := int64(0)
+			if err == nil && len(countResult.Rows) > 0 && len(countResult.Rows[0]) > 0 {
+				switch v := countResult.Rows[0][0].(type) {
+				case int64:
+					count = v
+				case float64:
+					count = int64(v)
+				}
+			}
+			result = append(result, tableInfo{Name: name, Rows: count})
+		}
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+// dbAdminHTML é a interface web embutida do DB Admin.
+// Single-file HTML com editor SQL, resultados em tabela, atalhos de tabelas.
+const dbAdminHTML = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TicketRadar — DB Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0D0D0D;--bg2:#141414;--bg3:#1A1A1A;--border:rgba(255,255,255,0.08);--text:#F0F0F5;--muted:#8B8FA3;--primary:#FF4B6E;--success:#06D6A0;--warn:#FFD166;--font-mono:'JetBrains Mono',monospace}
+body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;height:100vh;display:flex;flex-direction:column}
+header{background:var(--bg2);border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+header h1{font-size:.95rem;font-weight:700;letter-spacing:-.01em}
+header .badge{background:rgba(255,75,110,.15);color:var(--primary);border:1px solid rgba(255,75,110,.3);border-radius:4px;padding:2px 8px;font-size:.7rem;font-weight:700}
+.layout{display:flex;flex:1;overflow:hidden}
+.sidebar{width:200px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;overflow:hidden}
+.sidebar h2{font-size:.7rem;font-weight:700;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;padding:12px 14px 8px}
+.table-list{overflow-y:auto;flex:1}
+.table-item{padding:7px 14px;cursor:pointer;font-size:.8rem;color:var(--muted);display:flex;justify-content:space-between;align-items:center;border-radius:4px;margin:1px 6px;transition:.15s}
+.table-item:hover{background:var(--bg3);color:var(--text)}
+.table-item .count{font-size:.7rem;background:var(--bg3);border-radius:3px;padding:1px 5px}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.editor-area{padding:12px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;flex-shrink:0}
+.editor-row{display:flex;gap:8px;align-items:flex-end}
+textarea{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--font-mono);font-size:.8rem;line-height:1.5;padding:10px 12px;resize:vertical;min-height:80px;outline:none;transition:.15s}
+textarea:focus{border-color:var(--primary)}
+.btn{background:var(--primary);color:#fff;border:none;cursor:pointer;padding:8px 18px;border-radius:6px;font-family:inherit;font-size:.82rem;font-weight:600;white-space:nowrap;transition:.15s;height:36px}
+.btn:hover{opacity:.85}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-ghost{background:var(--bg3);border:1px solid var(--border);color:var(--muted)}
+.btn-ghost:hover{color:var(--text);border-color:rgba(255,255,255,.2)}
+.shortcuts{display:flex;gap:6px;flex-wrap:wrap}
+.shortcut{background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:.72rem;color:var(--muted);cursor:pointer;font-family:var(--font-mono);transition:.15s}
+.shortcut:hover{color:var(--text);border-color:var(--primary)}
+.result-area{flex:1;overflow:auto;padding:12px}
+.meta{font-size:.72rem;color:var(--muted);margin-bottom:8px;display:flex;gap:16px}
+.meta span{display:flex;align-items:center;gap:4px}
+.meta .ok{color:var(--success)}
+.meta .err{color:var(--primary)}
+table{width:100%;border-collapse:collapse;font-size:.78rem}
+th{background:var(--bg3);color:var(--muted);font-weight:600;text-align:left;padding:7px 10px;border-bottom:1px solid var(--border);font-size:.7rem;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap;position:sticky;top:0}
+td{padding:6px 10px;border-bottom:1px solid rgba(255,255,255,.04);color:var(--text);font-family:var(--font-mono);font-size:.77rem;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+tr:hover td{background:var(--bg3)}
+.null{color:var(--muted);font-style:italic}
+.empty{text-align:center;padding:40px;color:var(--muted);font-size:.85rem}
+.error-box{background:rgba(255,75,110,.1);border:1px solid rgba(255,75,110,.3);border-radius:6px;padding:12px;color:var(--primary);font-size:.82rem;margin-bottom:8px;font-family:var(--font-mono)}
+</style>
+</head>
+<body>
+<header>
+  <span>🎟️</span>
+  <h1>TicketRadar — DB Admin</h1>
+  <span class="badge">PRODUCTION</span>
+  <span style="color:var(--muted);font-size:.75rem;margin-left:auto">Apenas SELECT permitido</span>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <h2>Tabelas</h2>
+    <div class="table-list" id="tableList"><div class="empty">Carregando...</div></div>
+  </aside>
+  <div class="main">
+    <div class="editor-area">
+      <div class="shortcuts" id="shortcuts">
+        <span class="shortcut" onclick="setQuery('SELECT * FROM waitlist ORDER BY created_at DESC LIMIT 50')">waitlist</span>
+        <span class="shortcut" onclick="setQuery('SELECT COUNT(*) as total, COUNT(CASE WHEN consent_marketing=1 THEN 1 END) as marketing FROM waitlist')">waitlist stats</span>
+        <span class="shortcut" onclick="setQuery('SELECT event_label, status, logged_at FROM status_log ORDER BY logged_at DESC LIMIT 100')">status log</span>
+        <span class="shortcut" onclick="setQuery('SELECT action, email_hash, logged_at FROM lgpd_audit ORDER BY logged_at DESC LIMIT 50')">audit LGPD</span>
+        <span class="shortcut" onclick="setQuery('SELECT id, label, url, platform, active FROM events ORDER BY id')">events</span>
+        <span class="shortcut" onclick="setQuery('SELECT event_url, COUNT(*) as alerts, MAX(alerted_at) as last FROM alert_log GROUP BY event_url')">alert log</span>
+      </div>
+      <div class="editor-row">
+        <textarea id="query" placeholder="SELECT * FROM waitlist LIMIT 10;" spellcheck="false"></textarea>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <button class="btn" id="runBtn" onclick="runQuery()">▶ Executar</button>
+          <button class="btn btn-ghost" onclick="clearResult()">Limpar</button>
+        </div>
+      </div>
+    </div>
+    <div class="result-area" id="result">
+      <div class="empty">Execute uma query para ver os resultados.</div>
+    </div>
+  </div>
+</div>
+<script>
+const queryEl = document.getElementById('query');
+const resultEl = document.getElementById('result');
+const runBtn = document.getElementById('runBtn');
+
+// Ctrl+Enter executa
+queryEl.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') runQuery();
+});
+
+function setQuery(q) {
+  queryEl.value = q;
+  queryEl.focus();
+}
+
+function clearResult() {
+  resultEl.innerHTML = '<div class="empty">Execute uma query para ver os resultados.</div>';
+}
+
+async function runQuery() {
+  const q = queryEl.value.trim();
+  if (!q) return;
+  runBtn.disabled = true;
+  runBtn.textContent = '⏳ Executando...';
+  resultEl.innerHTML = '';
+  try {
+    const r = await fetch('/admin/db/query', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({query: q})
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      resultEl.innerHTML = '<div class="error-box">⚠️ ' + (data.error || 'Erro desconhecido') + '</div>';
+      return;
+    }
+    renderResult(data);
+  } catch(e) {
+    resultEl.innerHTML = '<div class="error-box">⚠️ Erro de rede: ' + e.message + '</div>';
+  } finally {
+    runBtn.disabled = false;
+    runBtn.textContent = '▶ Executar';
+  }
+}
+
+function renderResult(data) {
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.innerHTML = '<span class="ok">✓ ' + data.row_count + ' linhas</span>' +
+    '<span>' + data.duration_ms + 'ms</span>' +
+    '<span>' + data.columns.length + ' colunas</span>';
+  resultEl.appendChild(meta);
+
+  if (data.row_count === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'Nenhuma linha retornada.';
+    resultEl.appendChild(empty);
+    return;
+  }
+
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  data.columns.forEach(col => {
+    const th = document.createElement('th');
+    th.textContent = col;
+    headerRow.appendChild(th);
+  });
+  thead.appendChild(headerRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  data.rows.forEach(row => {
+    const tr = document.createElement('tr');
+    row.forEach(val => {
+      const td = document.createElement('td');
+      if (val === null || val === undefined) {
+        td.innerHTML = '<span class="null">NULL</span>';
+      } else {
+        td.textContent = String(val);
+        td.title = String(val);
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  resultEl.appendChild(table);
+}
+
+// Carregar tabelas
+async function loadTables() {
+  try {
+    const r = await fetch('/admin/db/tables');
+    const tables = await r.json();
+    const list = document.getElementById('tableList');
+    list.innerHTML = '';
+    tables.forEach(t => {
+      const item = document.createElement('div');
+      item.className = 'table-item';
+      item.innerHTML = '<span>' + t.name + '</span><span class="count">' + t.rows + '</span>';
+      item.onclick = () => setQuery('SELECT * FROM ' + t.name + ' ORDER BY rowid DESC LIMIT 50');
+      list.appendChild(item);
+    });
+  } catch(e) {
+    document.getElementById('tableList').innerHTML = '<div class="empty">Erro ao carregar</div>';
+  }
+}
+
+loadTables();
+</script>
+</body>
+</html>`
+
 // healthHandler — para Railway/uptime checks
 // Aceita apenas GET — métodos distintos retornam 405.
 func healthHandler() http.HandlerFunc {
@@ -785,6 +1078,10 @@ func adminEventsHandler(db *store.DB) http.HandlerFunc {
 }
 
 func main() {
+	// Fase 0.2: Setup de logging — Better Stack se BETTERSTACK_TOKEN estiver configurado
+	cleanup := logger.Setup()
+	defer cleanup()
+
 	cfg := loadConfig()
 
 	db, err := store.Open(cfg.DBPath)
@@ -823,7 +1120,7 @@ func main() {
 	// A3: rate limiter global — 5 requests/min por IP no /api/waitlist
 	rl := newRateLimiter(5, 1*time.Minute)
 
-	scheduler := &Scheduler{cfg: cfg, db: db, events: events, startedAt: time.Now()}
+	scheduler := &Scheduler{cfg: cfg, db: db, events: events, startedAt: time.Now(), metrics: nil}
 	go scheduler.run()
 
 	// Middleware de Basic Auth para rotas de API internas
@@ -840,12 +1137,22 @@ func main() {
 	mux.HandleFunc("/api/status", statusHandler(scheduler))
 	mux.HandleFunc("/health", healthHandler())
 
+	// Fase 1: /metrics — Prometheus format, protegido por Basic Auth
+	m := metrics.New()
+	scheduler.metrics = m
+	mux.Handle("/metrics", adminAuth(m.Handler()))
+
 	// Rotas internas protegidas por Basic Auth
 	mux.Handle("/api/metrics", adminAuth(http.HandlerFunc(metricsHandler(scheduler))))
 	mux.Handle("/api/history", adminAuth(http.HandlerFunc(historyHandler(db))))
 
 	// Sprint 2: endpoint admin para gerenciar eventos (CRUD com SSRF protection)
 	mux.Handle("/admin/events", adminAuth(http.HandlerFunc(adminEventsHandler(db))))
+
+	// Fase 0.1: DB Admin — acesso seguro ao banco via browser
+	mux.Handle("/admin/db", adminAuth(http.HandlerFunc(adminDBUIHandler())))
+	mux.Handle("/admin/db/query", adminAuth(http.HandlerFunc(adminDBQueryHandler(db))))
+	mux.Handle("/admin/db/tables", adminAuth(http.HandlerFunc(adminDBTablesHandler(db))))
 
 	// Middlewares encadeados (ordem de aplicação: requestID → security headers → CORS → handler)
 	handler := chain(

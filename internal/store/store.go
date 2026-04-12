@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/victorgsrocha/ticketradar/internal/monitor"
@@ -440,4 +441,70 @@ func (db *DB) RecentStatusLogs(limit int) ([]map[string]string, error) {
 
 func (db *DB) Close() error {
 	return db.conn.Close()
+}
+
+// QueryResult é o resultado de uma query SQL executada pelo admin
+type QueryResult struct {
+	Columns  []string        `json:"columns"`
+	Rows     [][]interface{} `json:"rows"`
+	Duration int64           `json:"duration_ms"`
+	RowCount int             `json:"row_count"`
+}
+
+// AdminQuery executa uma query SQL somente-leitura (SELECT) de forma segura.
+// Bloqueia comandos DDL/DML perigosos. Retorna colunas + linhas como JSON.
+func (db *DB) AdminQuery(query string) (*QueryResult, error) {
+	// Validação de segurança — só permite SELECT
+	trimmed := strings.TrimSpace(strings.ToUpper(query))
+	forbidden := []string{"DROP", "DELETE", "UPDATE", "INSERT", "CREATE", "ALTER",
+		"TRUNCATE", "REPLACE", "ATTACH", "DETACH", "PRAGMA"}
+	for _, kw := range forbidden {
+		if strings.HasPrefix(trimmed, kw) {
+			return nil, fmt.Errorf("operação não permitida: apenas SELECT é aceito")
+		}
+	}
+
+	start := time.Now()
+	rows, err := db.conn.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("erro na query: %w", err)
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	var result [][]interface{}
+	for rows.Next() {
+		vals := make([]interface{}, len(cols))
+		ptrs := make([]interface{}, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			continue
+		}
+		// Converter []byte para string para JSON legível
+		row := make([]interface{}, len(cols))
+		for i, v := range vals {
+			if b, ok := v.([]byte); ok {
+				row[i] = string(b)
+			} else {
+				row[i] = v
+			}
+		}
+		result = append(result, row)
+	}
+	if result == nil {
+		result = [][]interface{}{}
+	}
+
+	return &QueryResult{
+		Columns:  cols,
+		Rows:     result,
+		Duration: time.Since(start).Milliseconds(),
+		RowCount: len(result),
+	}, nil
 }
