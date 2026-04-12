@@ -169,11 +169,14 @@ func maskEmailLog(email string) string {
 	return parts[0][:2] + "***@" + parts[1]
 }
 
-// SendSMS envia alerta via Twilio
+// SendSMS envia alerta via Twilio.
+// W3: inclui link direto para compra + instrução de ação imediata.
 func SendSMS(cfg Config, alert Alert) error {
 	apiURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json", cfg.TwilioSID)
 
-	msg := fmt.Sprintf("🎟️ CORRE! %s disponível!\n%s", alert.EventLabel, alert.EventURL)
+	// W3: link direto + urgência — cada caractere conta num SMS
+	msg := fmt.Sprintf("🎟️ CORRE! %s disponível!\nCompre agora: %s\n(Rápido, pode esgotar!)",
+		alert.EventLabel, alert.EventURL)
 
 	data := url.Values{}
 	data.Set("From", cfg.TwilioFrom)
@@ -205,48 +208,73 @@ func SendEmail(cfg Config, alert Alert) error {
 }
 
 // SendEmailToUser envia alerta de disponibilidade para um destinatário específico via Resend.
+// W3: inclui link direto para compra e instruções claras de ação.
 func SendEmailToUser(cfg Config, toEmail string, alert Alert) error {
-	subject := fmt.Sprintf("🎟️ DISPONÍVEL: %s", alert.EventLabel)
-	body := fmt.Sprintf(`CORRE! Detectamos disponibilidade para %s
+	subject := fmt.Sprintf("🚨 DISPONÍVEL AGORA: %s — Compre antes que esgote!", alert.EventLabel)
+	body := fmt.Sprintf(`CORRE! 🎟️ Detectamos que ingressos para %s estão disponíveis!
 
-Acesse agora:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👉 COMPRE AGORA:
 %s
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Status: %s
-Detectado às: %s
+⏱️  Detectado às %s
+⚡ Ingressos residuais esgotam rápido — clique no link acima imediatamente.
+
+Dicas para não perder:
+• Já tenha sua conta na Ticketmaster logada
+• Cartão de crédito salvo na conta
+• Clique no link e vá direto para o checkout
 
 ---
-Para cancelar sua inscrição: privacidade@ticketradar.com.br
+TicketRadar — Você dormiu. A gente ficou de olho. 🌙
 
-TicketRadar — Você dormiu. A gente não.`,
-		alert.EventLabel, alert.EventURL, alert.Status, alert.DetectedAt)
+Para cancelar alertas: privacidade@ticketradar.com.br
+`,
+		alert.EventLabel, alert.EventURL, alert.DetectedAt)
 
 	return sendViaResend(cfg.ResendAPIKey, fromAddress(cfg), toEmail, subject, body)
 }
 
 // SendWelcomeEmail envia email de boas-vindas ao usuário recém-cadastrado via Resend.
-func SendWelcomeEmail(cfg Config, toEmail, name string) error {
+// W5: inclui evento monitorado, frequência de checks e como cancelar.
+func SendWelcomeEmail(cfg Config, toEmail, name string, eventLabels []string) error {
 	displayName := name
 	if displayName == "" {
-		displayName = "por aí"
+		displayName = "fã"
 	}
 
-	subject := "🎟️ Você está na lista do TicketRadar!"
+	eventLine := "todos os eventos cadastrados"
+	if len(eventLabels) > 0 {
+		eventLine = strings.Join(eventLabels, ", ")
+	}
+
+	subject := "🎟️ Você está na lista — TicketRadar"
 	body := fmt.Sprintf(`Oi, %s! 👋
 
 Seu cadastro no TicketRadar foi confirmado. 🎉
 
-O que acontece agora:
-• Monitoramos a disponibilidade dos ingressos 24/7, a cada 30 segundos.
-• Quando detectarmos que ingressos abriram, você recebe um alerta imediatamente.
-• Sem spam. Só alertas reais.
+━━━━━━━━━━━━━━━━━━
+📋 O que você vai monitorar:
+%s
 
-Quer sair da lista? Manda um email para: privacidade@ticketradar.com.br
+⏱️  Com que frequência verificamos:
+A cada 30 segundos, 24 horas por dia, 7 dias por semana.
 
-Boa sorte na fila! 🎟️
+📱 Como você vai ser avisado:
+E-mail imediato quando detectarmos disponibilidade.
+O assunto vai ter "🚨 DISPONÍVEL AGORA" — ative notificações pra esse remetente!
+━━━━━━━━━━━━━━━━━━
+
+Dica: quando receber o alerta, clique o mais rápido possível. Ingressos residuais costumam esgotar em minutos.
+
+Boa sorte na fila! 🍀
 
 ---
-TicketRadar — Você dormiu. A gente não.`, displayName)
+TicketRadar — Você dormiu. A gente ficou de olho. 🌙
+
+Para sair da lista: privacidade@ticketradar.com.br
+`, displayName, eventLine)
 
 	return sendViaResend(cfg.ResendAPIKey, fromAddress(cfg), toEmail, subject, body)
 }

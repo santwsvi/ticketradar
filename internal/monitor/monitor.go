@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -48,6 +49,16 @@ type CheckResult struct {
 	Changed   bool // true se mudou em relação ao check anterior
 }
 
+// CheckConfig contém configuração opcional do monitor
+// (Worker proxy para fallback quando IP Railway é bloqueado).
+type CheckConfig struct {
+	// WorkerURL: URL base do Cloudflare Worker proxy
+	// Ex: "https://monitor.ticketradar.com.br"
+	// Se vazio, o monitor acessa a Ticketmaster diretamente.
+	WorkerURL   string
+	WorkerToken string
+}
+
 var (
 	salesStatusRe = regexp.MustCompile(`"salesStatus"\s*:\s*"([^"]+)"`)
 	// DisableCompression: força resposta não comprimida.
@@ -59,6 +70,7 @@ var (
 			DisableCompression: true,
 		},
 	}
+	workerClient = &http.Client{Timeout: 20 * time.Second}
 )
 
 // allowedDomains — SSRF protection
@@ -110,11 +122,85 @@ func nextUserAgent() string {
 }
 
 // Check faz uma requisição à página do evento e retorna o salesStatus.
-// Trata 403 (WAF/bot protection) sem propagar como erro — retorna UNKNOWN sem alterar o status anterior.
+// B2: se WorkerURL estiver configurado, usa o Cloudflare Worker como proxy
+//     (IP do edge Cloudflare em vez do IP fixo do Railway — evita bloqueio WAF).
+//     Se o Worker falhar ou retornar blocked, faz fallback para acesso direto.
 func Check(event Event, previous Status) (CheckResult, error) {
+	return CheckWithConfig(event, previous, CheckConfig{})
+}
+
+// CheckWithConfig permite passar configuração do Worker proxy.
+func CheckWithConfig(event Event, previous Status, cfg CheckConfig) (CheckResult, error) {
 	if !IsAllowedURL(event.URL) {
 		return CheckResult{}, fmt.Errorf("domínio não permitido: %s", event.URL)
 	}
+
+	// B2: tentar via Worker primeiro se configurado
+	if cfg.WorkerURL != "" && cfg.WorkerToken != "" {
+		result, err := checkViaWorker(event, previous, cfg)
+		if err == nil && result.Status != StatusUnknown {
+			return result, nil
+		}
+		// Fallback silencioso para acesso direto
+		log.Printf("[MONITOR] %s: Worker falhou (%v), tentando acesso direto", event.Label, err)
+	}
+
+	return checkDirect(event, previous)
+}
+
+// checkViaWorker consulta o Cloudflare Worker proxy
+func checkViaWorker(event Event, previous Status, cfg CheckConfig) (CheckResult, error) {
+	workerURL := fmt.Sprintf("%s/check?url=%s", cfg.WorkerURL, event.URL)
+	req, err := http.NewRequest("GET", workerURL, nil)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	req.Header.Set("X-Worker-Token", cfg.WorkerToken)
+
+	resp, err := workerClient.Do(req)
+	if err != nil {
+		return CheckResult{}, fmt.Errorf("worker request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return CheckResult{}, fmt.Errorf("worker retornou HTTP %d", resp.StatusCode)
+	}
+
+	var workerResp struct {
+		SalesStatus *string `json:"salesStatus"`
+		HTTPStatus  int     `json:"httpStatus"`
+		Blocked     bool    `json:"blocked"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&workerResp); err != nil {
+		return CheckResult{}, fmt.Errorf("decode worker response: %w", err)
+	}
+
+	if workerResp.Blocked {
+		log.Printf("[MONITOR] %s: Worker também bloqueado (HTTP %d via edge)", event.Label, workerResp.HTTPStatus)
+		return CheckResult{
+			Event:     event,
+			Status:    previous,
+			CheckedAt: time.Now(),
+			Changed:   false,
+		}, nil
+	}
+
+	if workerResp.SalesStatus == nil {
+		return CheckResult{}, fmt.Errorf("worker: salesStatus não encontrado")
+	}
+
+	status := extractStatus(fmt.Sprintf(`"salesStatus":"%s"`, *workerResp.SalesStatus))
+	return CheckResult{
+		Event:     event,
+		Status:    status,
+		CheckedAt: time.Now(),
+		Changed:   status != previous && previous != StatusUnknown,
+	}, nil
+}
+
+// checkDirect acessa a Ticketmaster diretamente (fallback)
+func checkDirect(event Event, previous Status) (CheckResult, error) {
 
 	req, err := http.NewRequest("GET", event.URL, nil)
 	if err != nil {

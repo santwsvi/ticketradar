@@ -1,0 +1,10 @@
+name = "ticketradar-monitor-proxy"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+# WORKER_TOKEN é configurado como secret via: wrangler secret put WORKER_TOKEN
+
+[[routes]]
+pattern = "monitor.ticketradar.com.br/*"
+zone_name = "ticketradar.com.br"

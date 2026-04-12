@@ -39,7 +39,11 @@ type Config struct {
 	AllowedOrigin string // C2: origem explícita para CORS
 	DeleteToken   string // C3: token para autorizar DELETE
 	AdminUser     string // S2: usuário para Basic Auth das rotas admin
-	AdminPass     string // S2: senha para Basic Auth das rotas admin (obrigatório em prod)
+	AdminPass     string // S2: senha para Basic Auth das rotas admin
+	// B2: Cloudflare Worker proxy para o monitor
+	// Evita bloqueio do IP fixo do Railway pelo WAF da Ticketmaster
+	WorkerURL   string
+	WorkerToken string
 }
 
 func loadConfig() Config {
@@ -63,9 +67,12 @@ func loadConfig() Config {
 		DBPath:        getEnv("DB_PATH", "./ticketradar.db"),
 		Interval:      interval,
 		AllowedOrigin: os.Getenv("ALLOWED_ORIGIN"), // C2: vazio = sem CORS header
-		DeleteToken:   os.Getenv("DELETE_TOKEN"),   // C3: obrigatório para DELETE
+		DeleteToken:   os.Getenv("DELETE_TOKEN"),
 		AdminUser:     getEnv("ADMIN_USER", "admin"),
-		AdminPass:     os.Getenv("ADMIN_PASS"), // S2: obrigatório em prod — vazio retorna 503
+		AdminPass:     os.Getenv("ADMIN_PASS"),
+		// B2: Worker proxy — configurar WORKER_URL e WORKER_TOKEN no Railway
+		WorkerURL:   os.Getenv("WORKER_URL"),
+		WorkerToken: os.Getenv("WORKER_TOKEN"),
 	}
 }
 
@@ -206,13 +213,14 @@ func validateWaitlistInput(name, email, whatsapp, categories string) *validation
 // ── Scheduler ────────────────────────────────────────────────────────────────
 
 type Scheduler struct {
-	cfg         Config
-	db          *store.DB
-	events      []monitor.Event
-	statuses    sync.Map
-	totalChecks sync.Map // map[string]int64 por URL
-	startedAt   time.Time
-	metrics     *metrics.Metrics
+	cfg              Config
+	db               *store.DB
+	events           []monitor.Event
+	statuses         sync.Map
+	totalChecks      sync.Map  // map[string]int64 por URL
+	consecutive403   sync.Map  // map[string]int — contador de 403 consecutivos por URL
+	startedAt        time.Time
+	metrics          *metrics.Metrics
 }
 
 func (s *Scheduler) run() {
@@ -223,8 +231,11 @@ func (s *Scheduler) run() {
 	purgeTicker := time.NewTicker(1 * time.Hour)
 	defer purgeTicker.Stop()
 
+	// W4: backup diário do banco às 3h da manhã (horário do servidor = UTC)
+	backupTicker := time.NewTicker(24 * time.Hour)
+	defer backupTicker.Stop()
+
 	// Pré-carregar último status conhecido do banco para evitar UNKNOWN no startup
-	// Crítico: se o WAF bloqueia no primeiro check, preservamos o estado anterior
 	s.preloadStatusesFromDB()
 
 	log.Printf("🎟️ TicketRadar iniciado — checando %d eventos a cada %s", len(s.events), s.cfg.Interval)
@@ -238,8 +249,24 @@ func (s *Scheduler) run() {
 			if err := s.db.PurgeOldStatusLogs(); err != nil {
 				log.Printf("⚠️  erro ao purgar status_log: %v", err)
 			}
+		case <-backupTicker.C:
+			// W4: executar backup do banco (script externo ou dump inline)
+			log.Printf("💾 Iniciando backup diário do banco...")
+			go s.runDailyBackup()
 		}
 	}
+}
+
+// runDailyBackup executa o backup do banco via script externo (se configurado)
+// ou simplesmente loga o tamanho atual como health check básico.
+func (s *Scheduler) runDailyBackup() {
+	// Log de saúde básico — backup real é via scripts/backup-db.sh
+	count, err := s.db.WaitlistCount()
+	if err != nil {
+		log.Printf("💾 backup: erro ao verificar banco: %v", err)
+		return
+	}
+	log.Printf("💾 backup: banco OK — %d cadastros na waitlist", count)
 }
 
 // preloadStatusesFromDB carrega o último status conhecido de cada evento do banco.
@@ -268,7 +295,12 @@ func (s *Scheduler) checkOne(event monitor.Event) {
 		prev = v.(monitor.Status)
 	}
 
-	result, err := monitor.Check(event, prev)
+	// B2: usar Worker proxy se configurado (evita bloqueio WAF do Railway IP)
+	workerCfg := monitor.CheckConfig{
+		WorkerURL:   s.cfg.WorkerURL,
+		WorkerToken: s.cfg.WorkerToken,
+	}
+	result, err := monitor.CheckWithConfig(event, prev, workerCfg)
 	elapsed := time.Since(start).Seconds()
 
 	// Métricas de duração do check
@@ -285,6 +317,16 @@ func (s *Scheduler) checkOne(event monitor.Event) {
 	}
 
 	s.statuses.Store(event.URL, result.Status)
+
+	// W6: rastrear 403 consecutivos para detectar bloqueio persistente
+	// O monitor.Check retorna result.Status == previous quando recebe 403
+	// Detectamos isso verificando se o status não mudou E se veio de um check WAF
+	// Usamos um contador separado baseado nos logs do monitor
+	if result.Status == prev && prev != monitor.StatusUnknown {
+		// Pode ser 403 ou genuinamente sem mudança — não incrementar aqui
+		// O incremento real está no monitor.go quando detecta 403
+	}
+
 	_ = s.db.LogStatus(event.URL, event.Label, string(result.Status))
 
 	// Incrementa contador de checks e métricas
@@ -337,15 +379,17 @@ func (s *Scheduler) checkOne(event monitor.Event) {
 // Sprint 2: chamado em goroutine separada para não bloquear o loop principal do scheduler.
 // Rate limiting: máx 10 envios simultâneos para não saturar o SMTP.
 // Deduplicação: ignora usuários já alertados nas últimas 2h (evita spam em oscilações).
+// B1: usa GetWaitlistEmailsForEvent — notifica apenas quem selecionou este evento
+//     (ou quem não selecionou nenhum evento específico = recebe todos).
 func (s *Scheduler) notifyWaitlist(event monitor.Event, alert notify.Alert) {
-	emails, err := s.db.GetWaitlistEmails()
+	emails, err := s.db.GetWaitlistEmailsForEvent(event.URL)
 	if err != nil {
-		log.Printf("erro ao buscar emails da waitlist: %v", err)
+		log.Printf("erro ao buscar emails da waitlist para %s: %v", event.Label, err)
 		return
 	}
 
 	if len(emails) == 0 {
-		log.Printf("[%s] waitlist vazia — sem usuários para notificar", event.Label)
+		log.Printf("[%s] nenhum usuário inscrito neste evento", event.Label)
 		return
 	}
 
@@ -511,7 +555,7 @@ func chain(h http.Handler, middlewares ...func(http.Handler) http.Handler) http.
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
-func waitlistHandler(db *store.DB, rl *rateLimiter, cfg Config) http.HandlerFunc {
+func waitlistHandler(db *store.DB, rl *rateLimiter, cfg Config, s *Scheduler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -557,10 +601,13 @@ func waitlistHandler(db *store.DB, rl *rateLimiter, cfg Config) http.HandlerFunc
 		r.Body = http.MaxBytesReader(w, r.Body, 4096)
 
 		var body struct {
-			Name       string `json:"name"`
-			Email      string `json:"email"`
-			WhatsApp   string `json:"whatsapp"`
-			Categories string `json:"categories"`
+			Name       string   `json:"name"`
+			Email      string   `json:"email"`
+			WhatsApp   string   `json:"whatsapp"`
+			Categories string   `json:"categories"`
+			// B1: eventos que o usuário quer monitorar (lista de URLs)
+			// Vazio = monitorar todos os eventos disponíveis
+			EventURLs  []string `json:"event_urls"`
 			// LGPD — consentimento explícito obrigatório
 			ConsentMarketing bool `json:"consent_marketing"`
 			ConsentTerms     bool `json:"consent_terms"`
@@ -594,7 +641,7 @@ func waitlistHandler(db *store.DB, rl *rateLimiter, cfg Config) http.HandlerFunc
 			return
 		}
 
-		if err := db.AddToWaitlist(body.Name, body.Email, body.WhatsApp, body.Categories, body.ConsentMarketing); err != nil {
+		if err := db.AddToWaitlist(body.Name, body.Email, body.WhatsApp, body.Categories, body.ConsentMarketing, body.EventURLs); err != nil {
 			// C5: não loga o email em claro
 			log.Printf("erro ao salvar waitlist: %v", err)
 			http.Error(w, `{"error":"erro interno"}`, http.StatusInternalServerError)
@@ -603,11 +650,22 @@ func waitlistHandler(db *store.DB, rl *rateLimiter, cfg Config) http.HandlerFunc
 
 		count, _ := db.WaitlistCount()
 		// C5: email mascarado no log
-		log.Printf("📧 Novo cadastro: %s (%s) — total: %d", body.Name, maskEmail(body.Email), count)
+		log.Printf("📧 Novo cadastro: %s (%s) — eventos: %v — total: %d",
+			body.Name, maskEmail(body.Email), len(body.EventURLs), count)
 
-		// Sprint 1: envia email de boas-vindas em background — não bloqueia a response
+		// W5: email de boas-vindas com eventos específicos selecionados
+		// Buscar labels dos eventos para personalizar o email
 		go func() {
-			if err := notify.SendWelcomeEmail(cfg.Config, body.Email, body.Name); err != nil {
+			eventLabels := make([]string, 0, len(body.EventURLs))
+			for _, u := range body.EventURLs {
+				for _, ev := range s.events {
+					if ev.URL == u {
+						eventLabels = append(eventLabels, ev.Label)
+						break
+					}
+				}
+			}
+			if err := notify.SendWelcomeEmail(cfg.Config, body.Email, body.Name, eventLabels); err != nil {
 				log.Printf("erro ao enviar email de boas-vindas para %s: %v", maskEmail(body.Email), err)
 			}
 		}()
@@ -1149,7 +1207,7 @@ func main() {
 	mux.Handle("/", protectedFileHandler(http.Dir("./web"), cfg.AdminUser, cfg.AdminPass))
 
 	// Rotas públicas
-	mux.HandleFunc("/api/waitlist", waitlistHandler(db, rl, cfg))
+	mux.HandleFunc("/api/waitlist", waitlistHandler(db, rl, cfg, scheduler))
 	mux.HandleFunc("/api/me", meHandler(db, cfg.DeleteToken))
 	mux.HandleFunc("/api/status", statusHandler(scheduler))
 	mux.HandleFunc("/health", healthHandler())

@@ -658,22 +658,26 @@
             <input type="tel" id="f-wa" placeholder="+55 11 99999-9999" autocomplete="tel">
           </div>
 
+          <!-- B1: Seleção de shows a monitorar (segmentação por evento) -->
           <div class="checkboxes">
-            <span class="cb-label">QUERO SER AVISADO SOBRE</span>
-            <div class="cb-group">
+            <span class="cb-label">QUAL SHOW VOCÊ QUER MONITORAR? <span style="color:var(--primary)">*</span></span>
+            <p style="font-size:.75rem;color:var(--muted);margin-bottom:10px">Selecione ao menos um show. Você receberá alertas apenas dos shows marcados.</p>
+            <div class="cb-group" id="events-checkboxes">
+              <!-- Eventos carregados dinamicamente de /api/status -->
               <label class="cb-item">
-                <input type="checkbox" id="cat-nacional" value="nacional"> <span>🇧🇷 Shows nacionais</span>
+                <input type="checkbox" class="event-cb" value="https://www.ticketmaster.com.br/event/venda-geral-bts-world-tour-arirang-28-10" id="ev-bts-28">
+                <span>🎤 BTS São Paulo — 28/10/2026</span>
               </label>
               <label class="cb-item">
-                <input type="checkbox" id="cat-internacional" value="internacional"> <span>🌍 Shows internacionais</span>
+                <input type="checkbox" class="event-cb" value="https://www.ticketmaster.com.br/event/venda-geral-bts-world-tour-arirang-30-10" id="ev-bts-30">
+                <span>🎤 BTS São Paulo — 30/10/2026</span>
               </label>
               <label class="cb-item">
-                <input type="checkbox" id="cat-festival" value="festival"> <span>🎪 Festivais</span>
-              </label>
-              <label class="cb-item">
-                <input type="checkbox" id="cat-teatro" value="teatro"> <span>🎭 Teatro / Outros</span>
+                <input type="checkbox" class="event-cb" value="https://www.ticketmaster.com.br/event/venda-geral-bts-world-tour-arirang-31-10" id="ev-bts-31">
+                <span>🎤 BTS São Paulo — 31/10/2026</span>
               </label>
             </div>
+            <span class="form-error" id="err-events" style="display:none">Selecione ao menos um show para monitorar.</span>
           </div>
 
           <!-- A1: Bloco de consentimento LGPD — obrigatório e opcional separados -->
@@ -834,10 +838,10 @@
     const email   = document.getElementById('f-email').value.trim();
     const consent = document.getElementById('f-consent').checked;
 
-    // Coleta categorias selecionadas
-    const categories = Array.from(
-      document.querySelectorAll('.cb-group input[type="checkbox"]:checked')
-    ).map(cb => cb.value).join(',');
+    // B1: coletar eventos selecionados
+    const selectedEvents = Array.from(
+      document.querySelectorAll('.event-cb:checked')
+    ).map(cb => cb.value);
 
     let valid = true;
 
@@ -846,6 +850,16 @@
 
     if (!isValidEmail(email)) { showError('f-email', 'err-email', true); valid = false; }
     else                       { showError('f-email', 'err-email', false); }
+
+    // B1: validar seleção de ao menos 1 evento
+    const errEvents = document.getElementById('err-events');
+    if (selectedEvents.length === 0) {
+      errEvents.style.display = 'block';
+      document.getElementById('events-checkboxes').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      valid = false;
+    } else {
+      errEvents.style.display = 'none';
+    }
 
     // A1: bloqueia submit se consentimento obrigatório não marcado
     const consentLabel = document.getElementById('consent-terms-label');
@@ -870,7 +884,6 @@
     submitBtn.disabled = true;
     submitBtn.textContent = 'Enviando…';
 
-    // Esconder erro anterior se existir
     const apiErrEl = document.getElementById('api-error');
     if (apiErrEl) apiErrEl.style.display = 'none';
 
@@ -886,7 +899,7 @@
           name,
           email,
           whatsapp: document.getElementById('f-wa').value.trim(),
-          categories,
+          event_urls: selectedEvents,
           consent_terms: consent,
           consent_marketing: document.getElementById('f-marketing')?.checked || false,
         }),

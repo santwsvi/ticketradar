@@ -121,17 +121,34 @@ func (db *DB) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_status_log_url ON status_log(event_url);
 		CREATE INDEX IF NOT EXISTS idx_status_log_logged_at ON status_log(logged_at);
 		CREATE INDEX IF NOT EXISTS idx_alert_log ON alert_log(email_hash, event_url, alerted_at);
+
+		-- B1: segmentação por evento — criada com IF NOT EXISTS para ser idempotente
+		-- Permite que usuários escolham quais shows monitorar.
+		-- Se não houver registro, o usuário recebe alertas de todos os eventos.
+		CREATE TABLE IF NOT EXISTS waitlist_events (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			waitlist_id INTEGER NOT NULL REFERENCES waitlist(id) ON DELETE CASCADE,
+			event_url   TEXT NOT NULL,
+			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(waitlist_id, event_url)
+		);
+		CREATE INDEX IF NOT EXISTS idx_waitlist_events_url ON waitlist_events(event_url);
 	`)
 	return err
 }
 
-// AddToWaitlist insere novo cadastro com registro de consentimento LGPD
-func (db *DB) AddToWaitlist(name, email, whatsapp, categories string, consentMarketing bool) error {
+// AddToWaitlist insere novo cadastro com registro de consentimento LGPD.
+// eventURLs: lista de URLs dos eventos que o usuário quer monitorar.
+//   - nil ou vazio = monitorar TODOS os eventos (comportamento legado)
+//   - preenchido   = monitorar apenas os eventos especificados (B1: segmentação)
+func (db *DB) AddToWaitlist(name, email, whatsapp, categories string, consentMarketing bool, eventURLs []string) error {
 	consent := 0
 	if consentMarketing {
 		consent = 1
 	}
-	_, err := db.conn.Exec(
+
+	// Inserir ou ignorar se email já existe (INSERT OR IGNORE mantém o registro anterior)
+	result, err := db.conn.Exec(
 		`INSERT OR IGNORE INTO waitlist (name, email, whatsapp, categories, consent_marketing, consent_terms, consent_at)
 		 VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`,
 		name, email, whatsapp, categories, consent,
@@ -139,7 +156,29 @@ func (db *DB) AddToWaitlist(name, email, whatsapp, categories string, consentMar
 	if err != nil {
 		return err
 	}
-	// Audit log — LGPD Art. 37
+
+	// Obter o ID do usuário (novo ou já existente)
+	waitlistID, err := result.LastInsertId()
+	if err != nil || waitlistID == 0 {
+		// Email já existia — buscar o ID
+		err = db.conn.QueryRow(`SELECT id FROM waitlist WHERE email = ?`, email).Scan(&waitlistID)
+		if err != nil {
+			return err
+		}
+	}
+
+	// B1: registrar os eventos selecionados
+	// Se eventURLs for vazio, o usuário recebe alertas de todos os eventos
+	for _, eventURL := range eventURLs {
+		if eventURL == "" {
+			continue
+		}
+		_, _ = db.conn.Exec(
+			`INSERT OR IGNORE INTO waitlist_events (waitlist_id, event_url) VALUES (?, ?)`,
+			waitlistID, eventURL,
+		)
+	}
+
 	return db.auditLog("INSERT", email, "")
 }
 
@@ -201,9 +240,8 @@ func (db *DB) WaitlistCount() (int, error) {
 	return count, err
 }
 
-// GetWaitlistEmails retorna todos os emails de usuários que consentiram com os termos.
-// Sprint 2: usado para notificar todos os cadastrados quando ingressos ficarem disponíveis.
-// Filtro: consent_terms=1 — apenas quem aceitou os termos explicitamente.
+// GetWaitlistEmails retorna TODOS os emails que consentiram (sem segmentação).
+// Mantido para compatibilidade — preferir GetWaitlistEmailsForEvent em novos usos.
 func (db *DB) GetWaitlistEmails() ([]string, error) {
 	rows, err := db.conn.Query(
 		`SELECT email FROM waitlist WHERE consent_terms = 1`,
@@ -221,13 +259,52 @@ func (db *DB) GetWaitlistEmails() ([]string, error) {
 		}
 		emails = append(emails, email)
 	}
-	if err := rows.Err(); err != nil {
+	if emails == nil {
+		emails = []string{}
+	}
+	return emails, rows.Err()
+}
+
+// GetWaitlistEmailsForEvent retorna emails de usuários que devem receber alerta de um evento.
+// B1: Segmentação — retorna quem:
+//   1. Selecionou explicitamente esse evento (waitlist_events), OU
+//   2. Não selecionou nenhum evento específico (recebe de todos — comportamento legado)
+func (db *DB) GetWaitlistEmailsForEvent(eventURL string) ([]string, error) {
+	rows, err := db.conn.Query(`
+		SELECT DISTINCT w.email
+		FROM waitlist w
+		WHERE w.consent_terms = 1
+		  AND (
+		    -- Usuário selecionou explicitamente este evento
+		    EXISTS (
+		      SELECT 1 FROM waitlist_events we
+		      WHERE we.waitlist_id = w.id AND we.event_url = ?
+		    )
+		    OR
+		    -- Usuário não selecionou nenhum evento (recebe todos — comportamento legado)
+		    NOT EXISTS (
+		      SELECT 1 FROM waitlist_events we2
+		      WHERE we2.waitlist_id = w.id
+		    )
+		  )
+	`, eventURL)
+	if err != nil {
 		return nil, err
+	}
+	defer rows.Close()
+
+	var emails []string
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			continue
+		}
+		emails = append(emails, email)
 	}
 	if emails == nil {
 		emails = []string{}
 	}
-	return emails, nil
+	return emails, rows.Err()
 }
 
 // HasBeenAlerted verifica se um usuário já foi alertado para este evento nas últimas N horas.
