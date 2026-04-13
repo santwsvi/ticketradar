@@ -145,6 +145,9 @@
 }
 </script>
 
+<!-- Analytics: Plausible (privacy-first, sem cookie banner) -->
+<script defer data-domain="ticketradar.com.br" src="https://plausible.io/js/script.js"></script>
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
@@ -686,12 +689,29 @@
     .urgency-grid { grid-template-columns: 1fr; }
   }
 </style>
+
+<!-- Analytics: Plausible (privacy-first, sem cookie banner, GDPR compliant) -->
+<script defer data-domain="ticketradar.com.br" src="https://plausible.io/js/script.js"></script>
 </head>
 <body>
+
+<!-- Tracking de eventos customizados -->
+<script>
+  // Rastrear quando usuário chega pelo UTM source
+  function trackUTM() {
+    const params = new URLSearchParams(window.location.search);
+    const source = params.get('utm_source');
+    if (source && window.plausible) {
+      window.plausible('UTM Visit', {props: {source: source}});
+    }
+  }
+  window.addEventListener('load', trackUTM);
+</script>
 
 <!-- ── NAV ── -->
 <nav>
   <div class="logo">🎟️ <span>Ticket</span>Radar</div>
+  <a href="/blog/" style="color:var(--muted);font-size:.85rem;text-decoration:none;margin-right:16px">Blog</a>
   <a href="#waitlist" class="btn-nav">Quero acesso</a>
 </nav>
 
@@ -981,6 +1001,21 @@
     const email   = document.getElementById('f-email').value.trim();
     const consent = document.getElementById('f-consent').checked;
 
+    // Capturar UTM source para tracking
+    const utmSource = new URLSearchParams(window.location.search).get('utm_source') || 
+                      localStorage.getItem('utm_source') || 'direct';
+    const utmMedium = new URLSearchParams(window.location.search).get('utm_medium') || 
+                      localStorage.getItem('utm_medium') || '';
+    const utmCampaign = new URLSearchParams(window.location.search).get('utm_campaign') || 
+                        localStorage.getItem('utm_campaign') || '';
+
+    // Salvar UTMs no localStorage para persistir entre páginas
+    if (new URLSearchParams(window.location.search).get('utm_source')) {
+      localStorage.setItem('utm_source', utmSource);
+      localStorage.setItem('utm_medium', utmMedium);
+      localStorage.setItem('utm_campaign', utmCampaign);
+    }
+
     // B1: coletar eventos selecionados
     const selectedEvents = Array.from(
       document.querySelectorAll('.event-cb:checked')
@@ -1045,6 +1080,9 @@
           event_urls: selectedEvents,
           consent_terms: consent,
           consent_marketing: document.getElementById('f-marketing')?.checked || false,
+          utm_source: utmSource,
+          utm_medium: utmMedium,
+          utm_campaign: utmCampaign,
         }),
       });
       clearTimeout(timeout);
