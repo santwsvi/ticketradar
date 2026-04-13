@@ -269,11 +269,26 @@ func (s *Scheduler) run() {
 
 // runDailyBackup executa o backup do banco via script externo (se configurado)
 // ou simplesmente loga o tamanho atual como health check básico.
-// runSMSOutreach envia SMS de boas-vindas para novos cadastrados que ainda não foram contactados.
-// Roda automaticamente: 5min após startup + a cada hora.
-// Registra cada envio em sms_outreach para evitar duplicatas.
-// Quando Twilio Trial → só funciona para números verificados (upgrade = todos)
+// runSMSOutreach executa o ciclo completo de outreach a cada hora:
+//
+//  1. syncTwilioVerifiedCallerIDs — busca números novos na waitlist e registra
+//     no Twilio Verified Caller IDs (envia SMS de verificação automático ao usuário).
+//     Quando o usuário confirmar, o número entra na lista e poderá receber SMS.
+//
+//  2. Envio de boas-vindas — para números já verificados que ainda não receberam
+//     a mensagem de boas-vindas, envia via Twilio e registra no banco.
+//
+// Com conta Trial: apenas números previamente verificados recebem SMS.
+// Com conta paga: todos os números recebem direto (sem verificação prévia).
 func (s *Scheduler) runSMSOutreach() {
+	// ETAPA 1: sincronizar novos números com o Twilio Verified Caller IDs
+	registered, skippedReg := s.syncTwilioVerifiedCallerIDs()
+	if registered > 0 {
+		log.Printf("[SMS Outreach] %d novos números registrados no Twilio para verificação", registered)
+	}
+	_ = skippedReg
+
+	// ETAPA 2: enviar boas-vindas para quem já pode receber SMS
 	pending, err := s.db.GetPendingSMSOutreach("welcome")
 	if err != nil {
 		log.Printf("[SMS Outreach] Erro ao buscar pendentes: %v", err)
@@ -283,22 +298,18 @@ func (s *Scheduler) runSMSOutreach() {
 		return
 	}
 
-	log.Printf("[SMS Outreach] %d novos cadastrados para contactar", len(pending))
+	log.Printf("[SMS Outreach] %d cadastrados para contatar", len(pending))
 
-	sent, failed, skipped := 0, 0, 0
+	sent, failed := 0, 0
 	for _, p := range pending {
-		// Montar mensagem personalizada
 		msg := fmt.Sprintf(
 			"Oi %s! 🎟️ Você tá no TicketRadar.\n\nAviso por e-mail quando sair ingresso do BTS SP.\n\nFique de olho: noreply@ticketradar.com.br\n\n— TicketRadar",
 			firstNameOf(p.Name),
 		)
 
 		sid, errMsg := sendTwilioSMS(
-			s.cfg.TwilioSID,
-			s.cfg.TwilioToken,
-			s.cfg.TwilioFrom,
-			p.Phone,
-			msg,
+			s.cfg.TwilioSID, s.cfg.TwilioToken, s.cfg.TwilioFrom,
+			p.Phone, msg,
 		)
 
 		if errMsg != "" {
@@ -311,16 +322,140 @@ func (s *Scheduler) runSMSOutreach() {
 			log.Printf("[SMS Outreach] ✅ Enviado para %s (SID: %s)", maskPhone(p.Phone), sid)
 		}
 
-		// Delay entre envios para não saturar a API do Twilio
 		time.Sleep(500 * time.Millisecond)
-		_ = skipped
 	}
 
 	if s.metrics != nil && (sent+failed) > 0 {
 		s.metrics.AlertsSentTotal.WithLabelValues("sms_outreach", "welcome").Add(float64(sent))
 	}
+	log.Printf("[SMS Outreach] Concluído: %d enviados, %d falhas de %d pendentes", sent, failed, len(pending))
+}
 
-	log.Printf("[SMS Outreach] Concluído: %d enviados, %d falhas", sent, failed)
+// syncTwilioVerifiedCallerIDs registra números novos da waitlist no Twilio.
+//
+// No Trial: Twilio envia um SMS de verificação para o número do usuário.
+//   O usuário responde com o código e o número fica verificado.
+//   Na próxima hora, o runSMSOutreach envia a mensagem de boas-vindas.
+//
+// Na conta paga: a API de Verified Caller IDs não é necessária — o Twilio
+//   envia direto para qualquer número. Mas a chamada é idempotente e segura.
+//
+// Retorna: (registrados, ignorados)
+func (s *Scheduler) syncTwilioVerifiedCallerIDs() (int, int) {
+	if s.cfg.TwilioSID == "" || s.cfg.TwilioToken == "" {
+		return 0, 0
+	}
+
+	// 1. Buscar lista atual de Verified Caller IDs no Twilio
+	verified, err := fetchTwilioVerifiedNumbers(s.cfg.TwilioSID, s.cfg.TwilioToken)
+	if err != nil {
+		log.Printf("[Twilio Sync] Erro ao buscar verificados: %v", err)
+		return 0, 0
+	}
+
+	// 2. Buscar todos os números da waitlist
+	waitlistNumbers, err := s.db.GetAllWaitlistPhones()
+	if err != nil {
+		log.Printf("[Twilio Sync] Erro ao buscar números da waitlist: %v", err)
+		return 0, 0
+	}
+
+	registered, skipped := 0, 0
+	for _, phone := range waitlistNumbers {
+		if phone == "" {
+			continue
+		}
+		// Se já está verificado no Twilio, pular
+		if verified[phone] {
+			skipped++
+			continue
+		}
+		// Registrar no Twilio (envia SMS de verificação para o usuário)
+		err := registerTwilioCallerID(s.cfg.TwilioSID, s.cfg.TwilioToken, phone)
+		if err != nil {
+			// Conta paga: erro 10002 não acontece. Trial: esperado para novos números.
+			log.Printf("[Twilio Sync] %s: %v", maskPhone(phone), err)
+		} else {
+			registered++
+			log.Printf("[Twilio Sync] 📲 Verificação solicitada para %s", maskPhone(phone))
+		}
+		time.Sleep(300 * time.Millisecond) // rate limit da API Twilio
+	}
+
+	return registered, skipped
+}
+
+// fetchTwilioVerifiedNumbers retorna o mapa de números já verificados no Twilio.
+func fetchTwilioVerifiedNumbers(accountSID, authToken string) (map[string]bool, error) {
+	apiURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/OutgoingCallerIds.json?PageSize=100", accountSID)
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth(accountSID, authToken)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		OutgoingCallerIds []struct {
+			PhoneNumber string `json:"phone_number"`
+		} `json:"outgoing_caller_ids"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	verified := make(map[string]bool)
+	for _, id := range result.OutgoingCallerIds {
+		verified[id.PhoneNumber] = true
+	}
+	return verified, nil
+}
+
+// registerTwilioCallerID adiciona um número ao Twilio Verified Caller IDs.
+// Twilio envia automaticamente um SMS com código de verificação para o número.
+func registerTwilioCallerID(accountSID, authToken, phone string) error {
+	apiURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/OutgoingCallerIds.json", accountSID)
+
+	data := url.Values{}
+	data.Set("PhoneNumber", phone)
+	data.Set("FriendlyName", "TicketRadar Waitlist")
+	// StatusCallback: quando verificado, poderíamos receber um webhook — futuro
+
+	req, err := http.NewRequest("POST", apiURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(accountSID, authToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		var errResp struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		// 10002 = trial não suporta verificação via API (esperado)
+		// 21452 = já verificado (ok)
+		if errResp.Code == 21452 {
+			return nil // já está verificado
+		}
+		return fmt.Errorf("[%d] %s", errResp.Code, errResp.Message)
+	}
+	return nil
 }
 
 func (s *Scheduler) runDailyBackup() {

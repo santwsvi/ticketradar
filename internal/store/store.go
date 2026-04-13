@@ -674,6 +674,30 @@ func normalizePhone(raw string) string {
 	return ""
 }
 
+// GetAllWaitlistPhones retorna todos os números normalizados da waitlist.
+// Usado pelo syncTwilioVerifiedCallerIDs para comparar com a base do Twilio.
+func (db *DB) GetAllWaitlistPhones() ([]string, error) {
+	rows, err := db.conn.Query(
+		`SELECT whatsapp FROM waitlist WHERE whatsapp IS NOT NULL AND whatsapp != '' AND consent_terms=1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var phones []string
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			continue
+		}
+		normalized := normalizePhone(raw)
+		if normalized != "" {
+			phones = append(phones, normalized)
+		}
+	}
+	return phones, rows.Err()
+}
+
 func (db *DB) Close() error {
 	return db.conn.Close()
 }
