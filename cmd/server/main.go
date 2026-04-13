@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -227,19 +228,27 @@ func (s *Scheduler) run() {
 	ticker := time.NewTicker(s.cfg.Interval)
 	defer ticker.Stop()
 
-	// Purge a cada hora — C6: mantém status_log com no máximo 48h de dados
 	purgeTicker := time.NewTicker(1 * time.Hour)
 	defer purgeTicker.Stop()
 
-	// W4: backup diário do banco às 3h da manhã (horário do servidor = UTC)
 	backupTicker := time.NewTicker(24 * time.Hour)
 	defer backupTicker.Stop()
 
-	// Pré-carregar último status conhecido do banco para evitar UNKNOWN no startup
+	// SMS Outreach: roda 5 minutos após startup e depois a cada hora
+	// Envia mensagem de boas-vindas para novos cadastrados automaticamente
+	outreachTicker := time.NewTicker(1 * time.Hour)
+	defer outreachTicker.Stop()
+
 	s.preloadStatusesFromDB()
 
 	log.Printf("🎟️ TicketRadar iniciado — checando %d eventos a cada %s", len(s.events), s.cfg.Interval)
 	s.checkAll()
+
+	// Rodar outreach 5 minutos após startup (pega quem chegou recentemente)
+	go func() {
+		time.Sleep(5 * time.Minute)
+		s.runSMSOutreach()
+	}()
 
 	for {
 		select {
@@ -250,15 +259,70 @@ func (s *Scheduler) run() {
 				log.Printf("⚠️  erro ao purgar status_log: %v", err)
 			}
 		case <-backupTicker.C:
-			// W4: executar backup do banco (script externo ou dump inline)
 			log.Printf("💾 Iniciando backup diário do banco...")
 			go s.runDailyBackup()
+		case <-outreachTicker.C:
+			go s.runSMSOutreach()
 		}
 	}
 }
 
 // runDailyBackup executa o backup do banco via script externo (se configurado)
 // ou simplesmente loga o tamanho atual como health check básico.
+// runSMSOutreach envia SMS de boas-vindas para novos cadastrados que ainda não foram contactados.
+// Roda automaticamente: 5min após startup + a cada hora.
+// Registra cada envio em sms_outreach para evitar duplicatas.
+// Quando Twilio Trial → só funciona para números verificados (upgrade = todos)
+func (s *Scheduler) runSMSOutreach() {
+	pending, err := s.db.GetPendingSMSOutreach("welcome")
+	if err != nil {
+		log.Printf("[SMS Outreach] Erro ao buscar pendentes: %v", err)
+		return
+	}
+	if len(pending) == 0 {
+		return
+	}
+
+	log.Printf("[SMS Outreach] %d novos cadastrados para contactar", len(pending))
+
+	sent, failed, skipped := 0, 0, 0
+	for _, p := range pending {
+		// Montar mensagem personalizada
+		msg := fmt.Sprintf(
+			"Oi %s! 🎟️ Você tá no TicketRadar.\n\nAviso por e-mail quando sair ingresso do BTS SP.\n\nFique de olho: noreply@ticketradar.com.br\n\n— TicketRadar",
+			firstNameOf(p.Name),
+		)
+
+		sid, errMsg := sendTwilioSMS(
+			s.cfg.TwilioSID,
+			s.cfg.TwilioToken,
+			s.cfg.TwilioFrom,
+			p.Phone,
+			msg,
+		)
+
+		if errMsg != "" {
+			failed++
+			_ = s.db.RecordSMSOutreach(p.WaitlistID, p.Phone, "welcome", "failed", sid, errMsg)
+			log.Printf("[SMS Outreach] Falha %s: %s", maskPhone(p.Phone), errMsg)
+		} else {
+			sent++
+			_ = s.db.RecordSMSOutreach(p.WaitlistID, p.Phone, "welcome", "sent", sid, "")
+			log.Printf("[SMS Outreach] ✅ Enviado para %s (SID: %s)", maskPhone(p.Phone), sid)
+		}
+
+		// Delay entre envios para não saturar a API do Twilio
+		time.Sleep(500 * time.Millisecond)
+		_ = skipped
+	}
+
+	if s.metrics != nil && (sent+failed) > 0 {
+		s.metrics.AlertsSentTotal.WithLabelValues("sms_outreach", "welcome").Add(float64(sent))
+	}
+
+	log.Printf("[SMS Outreach] Concluído: %d enviados, %d falhas", sent, failed)
+}
+
 func (s *Scheduler) runDailyBackup() {
 	// Log de saúde básico — backup real é via scripts/backup-db.sh
 	count, err := s.db.WaitlistCount()
@@ -1013,6 +1077,192 @@ loadTables();
 
 // healthHandler — para Railway/uptime checks
 // Aceita apenas GET — métodos distintos retornam 405.
+// adminSMSHandler gerencia o outreach por SMS/WhatsApp.
+// Usado pelo Cloudflare Worker Cron para automação de mensagens.
+//
+// GET  /admin/sms/pending?type=welcome  → lista usuários pendentes + envia via Twilio
+// POST /admin/sms/record               → registra resultado de envio externo
+// GET  /admin/sms/stats                → contagem por status
+func adminSMSHandler(db *store.DB, cfg Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		path := strings.TrimPrefix(r.URL.Path, "/admin/sms")
+
+		switch {
+		// GET /admin/sms/stats
+		case path == "/stats" && r.Method == http.MethodGet:
+			stats, err := db.SMSOutreachStats()
+			if err != nil {
+				http.Error(w, `{"error":"erro interno"}`, http.StatusInternalServerError)
+				return
+			}
+			// Adicionar total de pendentes
+			pending, _ := db.GetPendingSMSOutreach("welcome")
+			stats["pending_welcome"] = len(pending)
+			json.NewEncoder(w).Encode(stats)
+
+		// GET /admin/sms/pending?type=welcome — lista E dispara SMS
+		case path == "/pending" && r.Method == http.MethodGet:
+			msgType := r.URL.Query().Get("type")
+			if msgType == "" {
+				msgType = "welcome"
+			}
+			dryRun := r.URL.Query().Get("dry_run") == "true"
+
+			pending, err := db.GetPendingSMSOutreach(msgType)
+			if err != nil {
+				http.Error(w, `{"error":"erro ao buscar pendentes"}`, http.StatusInternalServerError)
+				return
+			}
+
+			type result struct {
+				Name    string `json:"name"`
+				Phone   string `json:"phone"`
+				Status  string `json:"status"`
+				SID     string `json:"sid,omitempty"`
+				Error   string `json:"error,omitempty"`
+				DryRun  bool   `json:"dry_run,omitempty"`
+			}
+
+			results := make([]result, 0, len(pending))
+			sent, failed := 0, 0
+
+			for _, p := range pending {
+				res := result{Name: p.Name, Phone: p.Phone}
+
+				if dryRun {
+					res.Status = "dry_run"
+					res.DryRun = true
+					results = append(results, res)
+					continue
+				}
+
+				// Montar mensagem por tipo
+				var msg string
+				switch msgType {
+				case "welcome":
+					msg = fmt.Sprintf("Oi %s! 🎟️ Você tá cadastrado no TicketRadar.\n\nVamos te avisar quando sair ingresso do BTS SP.\n\nFique de olho no seu e-mail: noreply@ticketradar.com.br\n\n— TicketRadar", firstNameOf(p.Name))
+				case "nudge":
+					msg = "🎟️ TicketRadar: ainda monitorando BTS SP. Apareceu ingresso, você é um dos primeiros a saber. ticketradar.com.br"
+				default:
+					msg = "🎟️ TicketRadar — seus alertas de ingresso estão ativos. ticketradar.com.br"
+				}
+
+				// Enviar via Twilio
+				sid, errMsg := sendTwilioSMS(cfg.TwilioSID, cfg.TwilioToken, cfg.TwilioFrom, p.Phone, msg)
+				if errMsg != "" {
+					res.Status = "failed"
+					res.Error = errMsg
+					failed++
+					_ = db.RecordSMSOutreach(p.WaitlistID, p.Phone, msgType, "failed", sid, errMsg)
+				} else {
+					res.Status = "sent"
+					res.SID = sid
+					sent++
+					_ = db.RecordSMSOutreach(p.WaitlistID, p.Phone, msgType, "sent", sid, "")
+					log.Printf("[SMS] %s enviado para %s (SID: %s)", msgType, maskPhone(p.Phone), sid)
+				}
+				results = append(results, res)
+			}
+
+			json.NewEncoder(w).Encode(map[string]any{
+				"processed": len(results),
+				"sent":      sent,
+				"failed":    failed,
+				"dry_run":   dryRun,
+				"results":   results,
+			})
+
+		// POST /admin/sms/record — registra resultado de envio externo (Worker)
+		case path == "/record" && r.Method == http.MethodPost:
+			var body struct {
+				WaitlistID  int64  `json:"waitlist_id"`
+				Phone       string `json:"phone"`
+				MessageType string `json:"message_type"`
+				Status      string `json:"status"`
+				TwilioSID   string `json:"twilio_sid"`
+				ErrorMsg    string `json:"error_msg"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, `{"error":"json inválido"}`, http.StatusBadRequest)
+				return
+			}
+			if err := db.RecordSMSOutreach(body.WaitlistID, body.Phone, body.MessageType, body.Status, body.TwilioSID, body.ErrorMsg); err != nil {
+				http.Error(w, `{"error":"erro ao registrar"}`, http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+
+		default:
+			http.Error(w, `{"error":"rota não encontrada"}`, http.StatusNotFound)
+		}
+	}
+}
+
+// sendTwilioSMS envia SMS via Twilio e retorna (SID, erro).
+func sendTwilioSMS(accountSID, authToken, from, to, body string) (string, string) {
+	apiURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json", accountSID)
+
+	data := url.Values{}
+	data.Set("From", from)
+	data.Set("To", to)
+	data.Set("Body", body)
+
+	req, err := http.NewRequest("POST", apiURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return "", err.Error()
+	}
+	req.SetBasicAuth(accountSID, authToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err.Error()
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		SID          string `json:"sid"`
+		Status       string `json:"status"`
+		ErrorCode    int    `json:"error_code"`
+		ErrorMessage string `json:"error_message"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if resp.StatusCode >= 400 || result.ErrorCode != 0 {
+		msg := result.ErrorMessage
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		}
+		return result.SID, fmt.Sprintf("[%d] %s", result.ErrorCode, msg)
+	}
+	return result.SID, ""
+}
+
+// firstNameOf extrai o primeiro nome de um nome completo.
+func firstNameOf(full string) string {
+	parts := strings.Fields(full)
+	if len(parts) == 0 {
+		return "fã"
+	}
+	name := parts[0]
+	// Capitalizar primeira letra
+	if len(name) > 0 {
+		return strings.ToUpper(name[:1]) + strings.ToLower(name[1:])
+	}
+	return name
+}
+
+// maskPhone mascara número de telefone para logs.
+func maskPhone(phone string) string {
+	if len(phone) < 6 {
+		return "***"
+	}
+	return phone[:4] + "***" + phone[len(phone)-2:]
+}
+
 func healthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1232,6 +1482,12 @@ func main() {
 
 	// Sprint 2: endpoint admin para gerenciar eventos (CRUD com SSRF protection)
 	mux.Handle("/admin/events", adminAuth(http.HandlerFunc(adminEventsHandler(db))))
+
+	// SMS Outreach — endpoints para o Cloudflare Worker Cron
+	// GET  /admin/sms/pending?type=welcome   — lista pendentes (autenticado)
+	// POST /admin/sms/record                 — registra resultado de envio
+	// GET  /admin/sms/stats                  — estatísticas de envio
+	mux.Handle("/admin/sms/", adminAuth(http.HandlerFunc(adminSMSHandler(db, cfg))))
 
 	// Fase 0.1: DB Admin — acesso seguro ao banco via browser
 	mux.Handle("/admin/db", adminAuth(http.HandlerFunc(adminDBUIHandler())))

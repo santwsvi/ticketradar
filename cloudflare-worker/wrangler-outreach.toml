@@ -1,0 +1,17 @@
+name = "ticketradar-sms-outreach"
+main = "sms-outreach.js"
+compatibility_date = "2024-01-01"
+
+# Cron: rodar a cada hora
+[triggers]
+crons = ["0 * * * *"]
+
+# KV namespace para logs de auditoria
+[[kv_namespaces]]
+binding = "OUTREACH_KV"
+id = "8b09b56db97248bb955da32e694c6a07"
+
+# Variáveis de ambiente (secrets via wrangler secret put)
+# WORKER_TOKEN  — token para autenticar chamadas HTTP manuais
+# ADMIN_PASS    — senha do painel admin do TicketRadar
+# BACKEND_URL   — URL do backend (padrão: https://ticketradar.com.br)

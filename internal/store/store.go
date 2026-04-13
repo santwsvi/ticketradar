@@ -133,6 +133,23 @@ func (db *DB) migrate() error {
 			UNIQUE(waitlist_id, event_url)
 		);
 		CREATE INDEX IF NOT EXISTS idx_waitlist_events_url ON waitlist_events(event_url);
+
+		-- Tabela de outreach por SMS/WhatsApp
+		-- Rastreia cada mensagem enviada para evitar duplicatas e medir engajamento
+		CREATE TABLE IF NOT EXISTS sms_outreach (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			waitlist_id  INTEGER NOT NULL REFERENCES waitlist(id) ON DELETE CASCADE,
+			phone        TEXT NOT NULL,           -- número normalizado E164
+			message_type TEXT NOT NULL DEFAULT 'welcome', -- welcome | alert | nudge
+			status       TEXT NOT NULL DEFAULT 'pending', -- pending | sent | failed | unsubscribed
+			twilio_sid   TEXT,                    -- SID da mensagem Twilio
+			error_msg    TEXT,                    -- erro se status=failed
+			sent_at      DATETIME,
+			created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(waitlist_id, message_type)     -- um tipo de mensagem por usuário
+		);
+		CREATE INDEX IF NOT EXISTS idx_sms_outreach_status ON sms_outreach(status);
+		CREATE INDEX IF NOT EXISTS idx_sms_outreach_phone  ON sms_outreach(phone);
 	`)
 	return err
 }
@@ -530,6 +547,131 @@ func (db *DB) LastStatusForEvent(eventURL string) (string, error) {
 		return "", nil
 	}
 	return status, err
+}
+
+// ── SMS Outreach ──────────────────────────────────────────────────────────────
+
+// OutreachPending representa um usuário que ainda não recebeu determinado tipo de mensagem
+type OutreachPending struct {
+	WaitlistID int64
+	Name       string
+	Phone      string // normalizado para E164
+	Email      string
+}
+
+// GetPendingSMSOutreach retorna usuários com WhatsApp que ainda não receberam
+// o tipo de mensagem especificado (ex: "welcome").
+// Normaliza números brasileiros automaticamente.
+func (db *DB) GetPendingSMSOutreach(messageType string) ([]OutreachPending, error) {
+	rows, err := db.conn.Query(`
+		SELECT w.id, w.name, w.whatsapp, w.email
+		FROM waitlist w
+		WHERE w.consent_terms = 1
+		  AND w.whatsapp IS NOT NULL
+		  AND w.whatsapp != ''
+		  AND NOT EXISTS (
+		    SELECT 1 FROM sms_outreach so
+		    WHERE so.waitlist_id = w.id
+		      AND so.message_type = ?
+		      AND so.status != 'failed'
+		  )
+		ORDER BY w.created_at ASC
+	`, messageType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pending []OutreachPending
+	for rows.Next() {
+		var p OutreachPending
+		var rawPhone string
+		if err := rows.Scan(&p.WaitlistID, &p.Name, &rawPhone, &p.Email); err != nil {
+			continue
+		}
+		p.Phone = normalizePhone(rawPhone)
+		if p.Phone == "" {
+			continue
+		}
+		pending = append(pending, p)
+	}
+	return pending, rows.Err()
+}
+
+// RecordSMSOutreach registra o envio (ou tentativa) de uma mensagem SMS.
+func (db *DB) RecordSMSOutreach(waitlistID int64, phone, messageType, status, twilioSID, errMsg string) error {
+	now := "datetime('now')"
+	sentAt := "NULL"
+	if status == "sent" {
+		sentAt = now
+	}
+
+	_, err := db.conn.Exec(fmt.Sprintf(`
+		INSERT INTO sms_outreach (waitlist_id, phone, message_type, status, twilio_sid, error_msg, sent_at)
+		VALUES (?, ?, ?, ?, NULLIF(?,'''), NULLIF(?,''), %s)
+		ON CONFLICT(waitlist_id, message_type) DO UPDATE SET
+		  status    = excluded.status,
+		  twilio_sid = COALESCE(excluded.twilio_sid, twilio_sid),
+		  error_msg  = excluded.error_msg,
+		  sent_at    = excluded.sent_at
+	`, sentAt),
+		waitlistID, phone, messageType, status, twilioSID, errMsg,
+	)
+	return err
+}
+
+// SMSOutreachStats retorna contagem por status para monitoramento.
+func (db *DB) SMSOutreachStats() (map[string]int, error) {
+	rows, err := db.conn.Query(
+		`SELECT status, COUNT(*) FROM sms_outreach GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stats := make(map[string]int)
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			continue
+		}
+		stats[status] = count
+	}
+	return stats, nil
+}
+
+// normalizePhone converte número para E164 (+55XXXXXXXXXXX).
+// Suporta formatos brasileiros: com/sem +55, com/sem 0, 10 ou 11 dígitos.
+func normalizePhone(raw string) string {
+	// Remover tudo que não é dígito ou +
+	cleaned := ""
+	for _, c := range raw {
+		if c >= '0' && c <= '9' {
+			cleaned += string(c)
+		}
+	}
+
+	if cleaned == "" {
+		return ""
+	}
+
+	// Já tem código do país (55 + 10 ou 11 dígitos = 12 ou 13 dígitos)
+	if len(cleaned) == 12 || len(cleaned) == 13 {
+		return "+" + cleaned
+	}
+
+	// 10 ou 11 dígitos = número brasileiro sem código do país
+	if len(cleaned) == 10 || len(cleaned) == 11 {
+		return "+55" + cleaned
+	}
+
+	// Formato desconhecido — retornar com + para tentar
+	if len(cleaned) > 8 {
+		return "+" + cleaned
+	}
+
+	return ""
 }
 
 func (db *DB) Close() error {
