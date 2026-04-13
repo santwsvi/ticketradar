@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /admin/
+Disallow: /api/
+Disallow: /dashboard.html
+Disallow: /docs.html
+Disallow: /metrics
+
+Sitemap: https://ticketradar.com.br/sitemap.xml

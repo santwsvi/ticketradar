@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0D0D0D"/>
+      <stop offset="100%" style="stop-color:#1A0A10"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1200" height="4" fill="#FF4B6E"/>
+  
+  <!-- Logo / nome -->
+  <text x="600" y="200" font-family="Arial, sans-serif" font-size="56" font-weight="900" 
+    fill="#FF4B6E" text-anchor="middle" letter-spacing="-2">🎟️ TicketRadar</text>
+  
+  <!-- Headline principal -->
+  <text x="600" y="290" font-family="Arial, sans-serif" font-size="42" font-weight="700"
+    fill="#F0F0F5" text-anchor="middle">Alerta de Ingressos BTS São Paulo</text>
+  <text x="600" y="345" font-family="Arial, sans-serif" font-size="42" font-weight="700"
+    fill="#F0F0F5" text-anchor="middle">na Ticketmaster</text>
+  
+  <!-- Sub -->
+  <text x="600" y="415" font-family="Arial, sans-serif" font-size="26"
+    fill="#8B8FA3" text-anchor="middle">Monitor automático a cada 30 segundos.</text>
+  <text x="600" y="455" font-family="Arial, sans-serif" font-size="26"
+    fill="#8B8FA3" text-anchor="middle">Alertas por e-mail. Grátis.</text>
+  
+  <!-- URL -->
+  <text x="600" y="540" font-family="Arial, sans-serif" font-size="30" font-weight="600"
+    fill="#FF4B6E" text-anchor="middle">ticketradar.com.br</text>
+</svg>
