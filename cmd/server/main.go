@@ -1203,6 +1203,15 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// SEO: handlers dedicados para arquivos críticos — garantem acesso mesmo com proxy Cloudflare
+	// O FileServer genérico às vezes falha com Cloudflare proxied + Railway cdnMode=off
+	for _, f := range []string{"sitemap.xml", "robots.txt", "og-image.svg"} {
+		name := f // capture for closure
+		mux.HandleFunc("/"+name, func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, "./web/"+name)
+		})
+	}
+
 	// FileServer com proteção para arquivos sensíveis
 	mux.Handle("/", protectedFileHandler(http.Dir("./web"), cfg.AdminUser, cfg.AdminPass))
 
