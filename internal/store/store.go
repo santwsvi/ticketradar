@@ -573,7 +573,19 @@ func (db *DB) GetPendingSMSOutreach(messageType string) ([]OutreachPending, erro
 		    SELECT 1 FROM sms_outreach so
 		    WHERE so.waitlist_id = w.id
 		      AND so.message_type = ?
-		      AND so.status != 'failed'
+		      AND (
+		        so.status = 'sent'
+		        OR so.status = 'unsubscribed'
+		        -- HTTP 400 = não verificado (Trial) → aguardar verificação manual
+		        -- Tenta de novo apenas após 24h para evitar rate limit
+		        OR (so.status = 'failed'
+		            AND so.error_msg LIKE '%400%'
+		            AND so.created_at > datetime('now', '-24 hours'))
+		        -- HTTP 429 = rate limit → aguardar 6h antes de tentar novamente
+		        OR (so.status = 'failed'
+		            AND so.error_msg LIKE '%429%'
+		            AND so.created_at > datetime('now', '-6 hours'))
+		      )
 		  )
 		ORDER BY w.created_at ASC
 	`, messageType)

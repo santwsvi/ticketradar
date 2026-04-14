@@ -1371,7 +1371,8 @@ func sendTwilioSMS(accountSID, authToken, from, to, body string) (string, string
 		if msg == "" {
 			msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		}
-		return result.SID, fmt.Sprintf("[%d] %s", result.ErrorCode, msg)
+		// Incluir HTTP status no erro para que o filtro do banco funcione (400, 429)
+		return result.SID, fmt.Sprintf("[%d] HTTP %d %s", result.ErrorCode, resp.StatusCode, msg)
 	}
 	return result.SID, ""
 }
