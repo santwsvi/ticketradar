@@ -56,6 +56,7 @@ func loadConfig() Config {
 	}
 	return Config{
 		Config: notify.Config{
+			BrevoAPIKey:  os.Getenv("BREVO_API_KEY"),
 			ResendAPIKey: os.Getenv("RESEND_API_KEY"),
 			EmailFrom:    os.Getenv("EMAIL_FROM"),
 			EmailTo:      os.Getenv("EMAIL_TO"),

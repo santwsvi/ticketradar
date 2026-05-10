@@ -15,8 +15,10 @@ import (
 
 // Config contém as credenciais de notificação
 type Config struct {
-	// Email — Resend API (HTTPS, sem SMTP)
-	ResendAPIKey string
+	// Email — multi-provider com fallback automático
+	// Ordem: Brevo (300/dia) → Resend (100/dia)
+	BrevoAPIKey  string // xkeysib-... — 300 emails/dia grátis
+	ResendAPIKey string // re_...      — 100 emails/dia grátis (fallback)
 	EmailFrom    string
 	EmailTo      string
 
@@ -43,8 +45,80 @@ type resendPayload struct {
 	Text    string   `json:"text"`
 }
 
-// sendViaResend envia email usando a API HTTP do Resend (porta 443 — sem SMTP)
-// Funciona no Railway free tier que bloqueia saída na porta 587.
+// sendEmail é o ponto de entrada unificado para envio de email.
+// Tenta Brevo primeiro (300/dia), faz fallback para Resend (100/dia) se falhar.
+// Assim o limite efetivo é 400 emails/dia com zero custo.
+func sendEmail(cfg Config, to, subject, body string) error {
+	from := fromAddress(cfg)
+
+	// Tentar Brevo primeiro
+	if cfg.BrevoAPIKey != "" {
+		if err := sendViaBrevo(cfg.BrevoAPIKey, from, cfg.EmailFrom, to, subject, body); err != nil {
+			log.Printf("[Email] Brevo falhou (%v), tentando Resend como fallback", err)
+		} else {
+			return nil
+		}
+	}
+
+	// Fallback: Resend
+	if cfg.ResendAPIKey != "" {
+		return sendViaResend(cfg.ResendAPIKey, from, to, subject, body)
+	}
+
+	return fmt.Errorf("nenhum provedor de email configurado (BREVO_API_KEY ou RESEND_API_KEY)")
+}
+
+// sendViaBrevo envia email via Brevo (ex-Sendinblue) — 300 emails/dia grátis.
+// API compatível com domínios próprios verificados.
+func sendViaBrevo(apiKey, from, fromEmail, to, subject, body string) error {
+	if apiKey == "" {
+		return fmt.Errorf("BREVO_API_KEY não configurado")
+	}
+
+	// Brevo espera nome e email separados
+	senderName := "TicketRadar"
+	senderEmail := fromEmail
+	if senderEmail == "" {
+		senderEmail = "noreply@ticketradar.com.br"
+	}
+
+	payload := map[string]any{
+		"sender":      map[string]string{"name": senderName, "email": senderEmail},
+		"to":          []map[string]string{{"email": to}},
+		"subject":     subject,
+		"textContent": body,
+	}
+
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("serializar payload Brevo: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "https://api.brevo.com/v3/smtp/email", bytes.NewReader(b))
+	if err != nil {
+		return fmt.Errorf("criar request Brevo: %w", err)
+	}
+	req.Header.Set("api-key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("chamada API Brevo: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("Brevo retornou %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// sendViaResend envia email usando a API HTTP do Resend — 100 emails/dia grátis.
+// Usado como fallback quando Brevo falha ou está no limite.
 func sendViaResend(apiKey, from, to, subject, body string) error {
 	if apiKey == "" {
 		return fmt.Errorf("RESEND_API_KEY não configurado")
@@ -233,7 +307,7 @@ Para cancelar alertas: privacidade@ticketradar.com.br
 `,
 		alert.EventLabel, alert.EventURL, alert.DetectedAt)
 
-	return sendViaResend(cfg.ResendAPIKey, fromAddress(cfg), toEmail, subject, body)
+	return sendEmail(cfg, toEmail, subject, body)
 }
 
 // SendWelcomeEmail envia email de boas-vindas ao usuário recém-cadastrado via Resend.
@@ -276,5 +350,5 @@ TicketRadar — Você dormiu. A gente ficou de olho. 🌙
 Para sair da lista: privacidade@ticketradar.com.br
 `, displayName, eventLine)
 
-	return sendViaResend(cfg.ResendAPIKey, fromAddress(cfg), toEmail, subject, body)
+	return sendEmail(cfg, toEmail, subject, body)
 }
